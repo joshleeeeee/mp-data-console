@@ -1,50 +1,81 @@
-# we-mp-mini
+# mp-data-console · 公众号数据控制台
 
-一个极简版微信公众号提取工具，只保留核心能力：
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![Node](https://img.shields.io/badge/Node.js-20%2B-339933?logo=nodedotjs&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
+![Vue](https://img.shields.io/badge/Vue-3.x-42B883?logo=vuedotjs&logoColor=white)
 
-- 扫码登录微信公众号后台
-- 抓取公众号文章（列表 + 正文）
+一个面向个人/小团队的微信公众号数据工作台：扫码登录、搜索确认、后台抓取、正文预览、导出、数据库浏览、MCP 配置，一站式完成。
+
+## 这个项目解决什么问题
+
+- 抓取流程繁琐：需要在登录、搜索、抓取、导出之间频繁切换。
+- 抓取体验焦虑：过去“抓取中”会卡住页面，用户不敢离开。
+- 数据可见性不足：抓了多少、重复多少、是否达到目标，不够透明。
+
+这个项目的目标是把流程做成**低心智负担控制台**：任务提交到后台后可以离开页面，回来可继续查看状态与结果。
+
+## 核心能力
+
+### 抓取链路
+
+- 扫码登录微信公众号后台（含状态轮询与会话恢复）
+- 公众号搜索与抓取前确认（头像、别名、目标条数）
+- 后台抓取任务（`queued/running/success/failed`）
+- 去重计数：目标条数按“新增且不重复”文章计算
+
+### 内容与导出
+
+- 抓取文章列表 + 正文
+- 正文在线预览（处理隐藏样式和图片防盗链问题）
 - 导出 Markdown / HTML / PDF
-- 提供 Vue + Vite 前端控制台
-- 内置微信图片代理与导出图片本地化（减少防盗链导致的丢图）
-- 提供低心智负担的三视图：抓取流程 / 数据库 / MCP 配置
-- 支持抓取前确认公众号（含头像）与抓取条数，并支持正文预览
+- 批量导出 ZIP
 
-不包含 RSS 和复杂调度。
+### 数据与运维
 
-## 1. 环境要求
+- 数据库在线浏览（分页、关键词、指定字段搜索、精确过滤）
+- 表注释 / 列注释展示
+- MCP SQLite 配置一键生成
+- 图片代理与导出图片本地化，降低防盗链导致的丢图
 
-- Python 3.11+
-- Linux / macOS / Windows
+## 架构概览
 
-如果需要导出 PDF：
-
-- 安装 Playwright 浏览器：`playwright install chromium`
-
-## 2. 安装
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
+```mermaid
+flowchart LR
+  UI[Vue Console] -->|REST API| API[FastAPI]
+  API --> DB[(SQLite)]
+  API --> WX[WeChat MP Backend]
+  API --> JOB[Capture Job Worker]
+  API --> EXP[Export Service]
+  API --> IMG[Image Proxy]
+  EXP --> OUT[data/exports]
 ```
 
-## 3. 启动
+## 环境要求
 
-### 3.0 一键启动（推荐）
+- Python 3.11+
+- Node.js 20+
+- Linux / macOS / Windows
+
+如果需要 PDF 导出，请安装 Playwright 浏览器：
+
+```bash
+playwright install chromium
+```
+
+## 3 分钟上手（推荐）
 
 ```bash
 ./scripts/dev-up.sh
 ```
 
-首次如果你希望脚本顺便安装依赖：
+首次自动安装依赖：
 
 ```bash
 ./scripts/dev-up.sh --install
 ```
 
-如果需要安装 PDF 导出依赖浏览器：
+首次同时安装 PDF 导出依赖：
 
 ```bash
 ./scripts/dev-up.sh --install --install-playwright
@@ -56,15 +87,25 @@ cp .env.example .env
 ./scripts/dev-down.sh
 ```
 
-### 3.1 启动后端 API
+默认访问地址：
+
+- 前端：`http://127.0.0.1:5173`
+- 后端：`http://127.0.0.1:18011`
+- API 文档：`http://127.0.0.1:18011/docs`
+
+## 手动启动（可选）
+
+### 后端
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
 uvicorn app.main:app --host 0.0.0.0 --port 18011 --reload
 ```
 
-打开文档：`http://127.0.0.1:18011/docs`
-
-### 3.2 启动前端控制台
+### 前端
 
 ```bash
 cd web
@@ -73,64 +114,156 @@ cp .env.example .env
 npm run dev
 ```
 
-默认地址：`http://127.0.0.1:5173`
+## 典型使用流程（UI）
 
-## 4. 使用流程（最小闭环）
+1. 获取二维码并扫码登录
+2. 搜索公众号并确认抓取目标
+3. 设置抓取条数（去重计数）与是否抓正文
+4. 提交抓取任务（任务进入后台执行，可离开当前页面）
+5. 回来查看任务状态（新增/更新/重复跳过/扫描页数）
+6. 在文章区预览正文并导出
 
-1. 获取二维码
-   - `GET /api/v1/auth/qr`
-2. 打开二维码图片扫码
-   - `GET /api/v1/auth/qr/image`
-3. 轮询登录状态
-   - `GET /api/v1/auth/status`
-4. 搜索公众号
-   - `GET /api/v1/mps/search?keyword=关键词`
-5. 保存公众号到本地
-   - `POST /api/v1/mps`
-6. 提交后台抓取任务（推荐，可离开页面）
-   - `POST /api/v1/mps/{mp_id}/sync/jobs`
-   - `GET /api/v1/mps/sync/jobs/{job_id}`
-   - `GET /api/v1/mps/sync/jobs`
-6.5 同步公众号文章（阻塞模式，兼容保留）
-   - `POST /api/v1/mps/{mp_id}/sync`
-7. 查看文章
-   - `GET /api/v1/articles`
-7.5 图片代理（防盗链）
-   - `GET /api/v1/assets/image?url=<原图地址>`
-7.6 一键抓取（搜索 + 入库 + 同步）
-   - `POST /api/v1/ops/quick-sync`
-7.7 数据库在线浏览
-   - `GET /api/v1/ops/db/tables`
-   - `GET /api/v1/ops/db/table/{table_name}`
-7.8 MCP 一键配置
-   - `GET /api/v1/ops/mcp/config`
-   - `POST /api/v1/ops/mcp/generate-file`
-8. 导出单篇
-   - `POST /api/v1/exports/article/{article_id}`
-9. 批量导出 ZIP
-   - `POST /api/v1/exports/batch`
+## API 快速索引（默认前缀：`/api/v1`）
 
-## 5. 目录结构
+### 认证
+
+- `GET /auth/qr`
+- `GET /auth/qr/image`
+- `GET /auth/status`
+- `GET /auth/session`
+- `POST /auth/logout`
+
+### 公众号与抓取
+
+- `GET /mps/search?keyword=关键词`
+- `POST /mps`
+- `GET /mps`
+- `POST /mps/{mp_id}/sync/jobs`（后台任务，推荐）
+- `GET /mps/sync/jobs`
+- `GET /mps/sync/jobs/{job_id}`
+- `POST /mps/{mp_id}/sync`（阻塞模式，兼容保留）
+
+### 文章与导出
+
+- `GET /articles`
+- `GET /articles/{article_id}`
+- `POST /articles/{article_id}/refresh`
+- `POST /exports/article/{article_id}`
+- `POST /exports/batch`
+- `GET /exports/files/{relative_path}`
+
+### 运维与工具
+
+- `GET /ops/overview`
+- `POST /ops/quick-sync`
+- `GET /ops/db/tables`
+- `GET /ops/db/table/{table_name}`
+- `GET /ops/mcp/config`
+- `POST /ops/mcp/generate-file`
+- `GET /assets/image?url=<原图地址>`
+
+## 请求示例
+
+所有接口统一返回结构：
+
+```json
+{
+  "ok": true,
+  "message": "ok",
+  "data": {}
+}
+```
+
+提交后台抓取任务：
+
+```bash
+curl -X POST "http://127.0.0.1:18011/api/v1/mps/<mp_id>/sync/jobs" \
+  -H "Content-Type: application/json" \
+  -d '{"pages":4,"target_count":20,"fetch_content":true}'
+```
+
+查询任务状态：
+
+```bash
+curl "http://127.0.0.1:18011/api/v1/mps/sync/jobs/<job_id>"
+```
+
+返回中的关键字段：
+
+- `status`：`queued` / `running` / `success` / `failed`
+- `created`：新增文章数
+- `updated`：已有文章更新数
+- `duplicates_skipped`：重复跳过数
+- `reached_target`：是否达到 `target_count`
+
+## 去重与任务语义
+
+- `target_count` 表示目标新增文章数（去重后计数）
+- 同一任务内若重复（按 `url/aid`），会跳过并计入 `duplicates_skipped`
+- 已存在文章会计入 `updated`，不会占用 `created` 目标条数
+- 若源数据不足，任务可完成但 `reached_target=false`
+- 后台任务依赖后端进程存活；重启后端会中断进行中的任务
+
+## 常用配置
+
+后端 `.env`（节选）：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `APP_NAME` | `we-mp-mini` | 服务名称 |
+| `API_PREFIX` | `/api/v1` | API 前缀 |
+| `HOST` | `0.0.0.0` | 后端监听地址 |
+| `PORT` | `18011` | 后端端口 |
+| `DATABASE_URL` | `sqlite:///./data/wechat_mini.db` | SQLite 地址 |
+| `REQUEST_TIMEOUT` | `20` | 微信请求超时（秒） |
+| `VERIFY_SSL` | `true` | 是否校验证书 |
+
+前端 `web/.env`（节选）：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `VITE_API_BASE` | `/api/v1` | 前端请求前缀 |
+| `VITE_DEV_API_TARGET` | `http://127.0.0.1:18011` | Vite 代理后端地址 |
+
+## 项目结构
 
 ```text
 app/
   core/           # 配置 + DB
   routers/        # API 路由
-  services/       # 微信认证/抓取/导出
-  models.py       # SQLAlchemy 模型
+  services/       # 微信认证/抓取/导出/任务
+  models.py       # SQLAlchemy 模型（含 capture_jobs）
   schemas.py      # Pydantic 模型
-  main.py         # FastAPI 启动入口
+  main.py         # FastAPI 入口
 web/
   src/            # Vue 页面与 API 调用
   vite.config.js  # 开发代理配置
 scripts/
   dev-up.sh       # 一键启动前后端
   dev-down.sh     # 停止前后端
+data/             # 本地数据库/导出文件/缓存（默认不提交）
 ```
 
-## 6. 注意事项
+## FAQ
 
-- 扫码登录态会过期，过期后需要重新扫码。
-- 请求过快会触发微信风控或限频。
-- 仅应抓取你有权限访问的账号内容。
-- 本项目是研究/自用工具，请遵守平台条款与当地法规。
+### 抓取中可以关闭页面吗？
+
+可以。抓取任务提交后在服务端后台执行，回来后页面会继续展示任务状态。
+
+### 为什么设置了 20 条但没抓满？
+
+常见原因是源数据不足、限频或重复较多。此时任务会完成，但 `reached_target` 可能为 `false`。
+
+### 任务为什么会失败？
+
+常见原因包括登录态失效、微信风控限频、或后端进程重启导致任务中断。
+
+### 为什么图片偶尔加载慢？
+
+图片经过代理以规避防盗链，会多一次转发请求，首次加载可能慢于直连。
+
+## 合规说明
+
+- 仅抓取你有权限访问的账号内容
+- 请遵守平台条款与当地法律法规
+- 本项目定位研究/自用工具，不提供平台绕过能力
