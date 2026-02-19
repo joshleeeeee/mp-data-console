@@ -35,7 +35,7 @@
 
 - 数据库在线浏览（分页、关键词、指定字段搜索、精确过滤）
 - 表注释 / 列注释展示
-- MCP SQLite 配置一键生成
+- MCP 文章文本服务配置一键生成（直连 SQLite）
 - 图片代理与导出图片本地化，降低防盗链导致的丢图
 
 ## 架构概览
@@ -50,6 +50,75 @@ flowchart LR
   API --> IMG[Image Proxy]
   EXP --> OUT[data/exports]
 ```
+
+## 实现原理（核心机制）
+
+### 1) 扫码登录 + 会话恢复
+
+- 后端通过 `requests.Session` 模拟公众号后台会话，请求微信首页提取二维码参数；若页面结构变化，自动回退到 `startlogin + scanloginqrcode` 流程生成二维码。
+- 轮询登录状态时，根据微信状态码映射为 `waiting_scan / scanned / logged_in / expired`，扫码成功后再调用登录接口完成 token 建立。
+- token 不是单点来源：会从响应 JSON、URL、页面文本、Cookie、历史 token 多路提取，并用 `switchacct` 接口校验可用性，降低偶发失败。
+- 会话信息（token、cookie、fingerprint、状态）持久化在 `auth_sessions`；服务重启后会自动恢复，并在 token 仍有效时回写为 `logged_in`。
+
+### 2) 公众号与文章抓取
+
+- 公众号先搜索后入库，按 `fakeid`（必要时 `biz`）做 upsert，避免重复创建。
+- 抓取文章时优先使用 `appmsgpublish`，若返回空再回退 `appmsg`，提升兼容性。
+- 每页按 5 条扫描，任务内用 `url + aid` 双键去重，重复项计入 `duplicates_skipped`。
+- `target_count` 只按“新增文章数（created）”计数，已存在文章更新计入 `updated`，不占目标额度。
+
+### 3) 后台任务执行模型
+
+- 前端提交抓取后，后端先写入 `capture_jobs`（`queued`），再启动守护线程异步执行，不阻塞接口返回。
+- 运行中持续把 `created/updated/content_updated/scanned_pages/max_pages/reached_target` 回写数据库，前端可轮询得到实时进度。
+- 服务内用互斥锁保证同一时刻只跑一个抓取 worker，避免并发抓取导致登录态冲突与频控风险。
+- 若进程异常重启，数据库里遗留的 `queued/running` 任务会在下次查询时自动标记为 `failed`，并提示“任务进程已中断”。
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as 用户
+  participant FE as Vue前端
+  participant API as FastAPI
+  participant JOB as 抓取Worker
+  participant WX as 微信公众号后台
+  participant DB as SQLite
+
+  U->>FE: 选择公众号并提交抓取参数
+  FE->>API: POST /mps/:mp_id/sync/jobs
+  API->>DB: 写入 capture_jobs(status=queued)
+  API-->>FE: 返回 job_id
+  API->>JOB: 启动后台线程(job_id)
+
+  JOB->>DB: 更新状态 running + started_at
+  loop 分页抓取直到结束或达标
+    JOB->>WX: 拉取文章列表(appmsgpublish/appmsg)
+    JOB->>WX: 可选拉取正文详情
+    JOB->>DB: upsert mps/articles
+    JOB->>DB: 回写进度(created/updated/scanned_pages)
+  end
+  JOB->>DB: 更新 success/failed + finished_at
+
+  loop 前端轮询
+    FE->>API: GET /mps/sync/jobs/:job_id
+    API->>DB: 读取任务状态与统计
+    API-->>FE: 返回最新进度
+  end
+  FE-->>U: 展示任务结果并支持导出
+```
+
+### 4) 正文解析与反爬兼容
+
+- 正文抓取后使用 `BeautifulSoup` 解析 `#js_content/#js_article`，移除脚本样式，并清理 `visibility:hidden`、`opacity:0`、`display:none` 等常见隐藏样式。
+- 图片链接统一回填到可用 `src`（优先 `data-src`），同时提取 `content_text`、封面、作者、发布时间等字段。
+- 遇到“当前环境异常，完成验证后即可继续访问”页面时，自动回退 Playwright，并复用登录 cookie 获取可渲染正文。
+
+### 5) 导出与图片防盗链处理
+
+- Markdown 导出时将图片地址改写为本地图片代理接口，减少外链防盗链导致的失效。
+- HTML/PDF 导出会尝试把正文图片下载到本地 `assets` 目录并重写相对路径；下载失败再降级为代理链接。
+- 图片代理仅允许微信相关域名，使用 `sha256(url)` 做缓存键，二进制 + 元信息分离存储，默认 7 天 TTL，支持重试与内容类型嗅探。
+- 批量导出时会把文章文件和对应 `assets` 一并打包 ZIP，下载接口带路径校验，防止越权读取。
 
 ## 环境要求
 
@@ -162,6 +231,61 @@ npm run dev
 - `POST /ops/mcp/generate-file`
 - `GET /assets/image?url=<原图地址>`
 
+## MCP 访问 SQLite 正文
+
+项目内置了 MCP 服务模块 `app.mcp_server`，可直接读取 SQLite 中的文章正文文本（`articles.content_text`），便于在 Claude Desktop / Cursor 等 MCP 客户端里做问答、检索和摘要。
+
+### 1) 安装
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 2) 本地启动 MCP（可选，用于调试）
+
+```bash
+python3 -m app.mcp_server --db-path "$(pwd)/data/wechat_mini.db"
+```
+
+### 3) 获取可直接粘贴的 MCP 配置
+
+方式 A：在前端「MCP 配置」页点击“刷新配置 / 生成配置文件”  
+方式 B：直接调用接口：
+
+```bash
+curl "http://127.0.0.1:18011/api/v1/ops/mcp/config"
+```
+
+返回中的 `config_json` 可直接用于客户端，例如：
+
+```json
+{
+  "mcpServers": {
+    "we-mp-mini-articles": {
+      "command": "/abs/path/to/python",
+      "args": [
+        "-m",
+        "app.mcp_server",
+        "--db-path",
+        "/abs/path/to/data/wechat_mini.db"
+      ]
+    }
+  }
+}
+```
+
+### 4) MCP 工具（读取正文）
+
+- `list_mps`：列出库内公众号（含文章数量、正文数量）
+- `list_articles_by_mp`：按公众号名或 `mp_id` 列出该号文章
+- `db_overview`：查看公众号数、文章数、带正文文章数
+- `search_articles`：按关键词搜索标题/正文，返回正文预览与文章 ID
+- `get_article_text`：按 `article_id` 或 `url` 读取完整正文文本
+
+建议流程：先用 `list_mps` / `list_articles_by_mp` 定位公众号和文章，再用 `get_article_text` 拉取全文。
+
 ## 请求示例
 
 所有接口统一返回结构：
@@ -234,6 +358,7 @@ app/
   services/       # 微信认证/抓取/导出/任务
   models.py       # SQLAlchemy 模型（含 capture_jobs）
   schemas.py      # Pydantic 模型
+  mcp_server.py   # MCP 服务（读取 SQLite 文章正文）
   main.py         # FastAPI 入口
 web/
   src/            # Vue 页面与 API 调用
