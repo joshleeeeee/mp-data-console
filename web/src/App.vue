@@ -33,6 +33,7 @@ const busy = reactive({
   search: false,
   capture: false,
   captureStatus: false,
+  favoriteMp: '',
   mps: false,
   articles: false,
   refreshArticle: '',
@@ -60,6 +61,8 @@ const captureJob = ref(null)
 const captureResult = ref(null)
 
 const mps = ref([])
+
+const favoriteMps = computed(() => mps.value.filter((item) => Boolean(item.is_favorite)))
 
 const articleFilter = reactive({
   mp_id: '',
@@ -293,6 +296,17 @@ function imageCount(article) {
   } catch {
     return 0
   }
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return '-'
+  }
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return '-'
+  }
+  return date.toLocaleString('zh-CN')
 }
 
 function sanitizeInlineStyle(styleText = '') {
@@ -635,6 +649,23 @@ function chooseCandidate(item) {
   selectedCandidate.value = item
 }
 
+async function submitCaptureJobByMpId(mpId) {
+  const job = await api(`/mps/${encodeURIComponent(mpId)}/sync/jobs`, {
+    method: 'POST',
+    body: {
+      pages: capturePages.value,
+      target_count: captureCount.value,
+      fetch_content: Boolean(captureForm.fetch_content),
+    },
+  })
+
+  captureResult.value = null
+  articleFilter.mp_id = mpId
+  await applyCaptureJobUpdate(job, true)
+  await Promise.all([loadOverview(), loadMps()])
+  return job
+}
+
 async function confirmCapture() {
   if (!selectedCandidate.value) {
     setNotice('warn', '请先选择公众号')
@@ -664,24 +695,73 @@ async function confirmCapture() {
       },
     })
 
-    const job = await api(`/mps/${saved.id}/sync/jobs`, {
-      method: 'POST',
-      body: {
-        pages: capturePages.value,
-        target_count: captureCount.value,
-        fetch_content: Boolean(captureForm.fetch_content),
-      },
-    })
-
-    captureResult.value = null
-    articleFilter.mp_id = saved.id
-    await applyCaptureJobUpdate(job, true)
-    await Promise.all([loadOverview(), loadMps()])
+    await submitCaptureJobByMpId(saved.id)
     setNotice('info', '抓取任务已提交到后台，页面可关闭或切换，稍后回来查看结果')
   } catch (err) {
     setNotice('error', err.message || '抓取失败')
   } finally {
     busy.capture = false
+  }
+}
+
+async function captureSavedMp(item) {
+  if (!item?.id) {
+    setNotice('warn', '公众号信息不完整')
+    return
+  }
+  if (!canCapture.value) {
+    setNotice('warn', '请先扫码登录')
+    return
+  }
+  if (hasActiveCaptureJob.value) {
+    setNotice('warn', '已有抓取任务在执行，请等待完成')
+    return
+  }
+
+  busy.capture = true
+  try {
+    await submitCaptureJobByMpId(item.id)
+    setNotice('info', `已为 ${item.nickname || '目标公众号'} 提交抓取任务`)
+  } catch (err) {
+    setNotice('error', err.message || '提交抓取失败')
+  } finally {
+    busy.capture = false
+  }
+}
+
+async function toggleFavoriteMp(item) {
+  if (!item?.id) {
+    return
+  }
+
+  const nextFavorite = !Boolean(item.is_favorite)
+  busy.favoriteMp = item.id
+  try {
+    const updated = await api(`/mps/${encodeURIComponent(item.id)}/favorite`, {
+      method: 'PATCH',
+      body: { is_favorite: nextFavorite },
+    })
+
+    const index = mps.value.findIndex((mp) => mp.id === item.id)
+    if (index >= 0) {
+      mps.value[index] = updated
+    }
+    mps.value = [...mps.value].sort((a, b) => {
+      const af = a.is_favorite ? 1 : 0
+      const bf = b.is_favorite ? 1 : 0
+      if (bf !== af) {
+        return bf - af
+      }
+      const at = a.last_used_at ? new Date(a.last_used_at).getTime() : 0
+      const bt = b.last_used_at ? new Date(b.last_used_at).getTime() : 0
+      return bt - at
+    })
+
+    setNotice('success', nextFavorite ? '已设为常用公众号' : '已取消常用公众号')
+  } catch (err) {
+    setNotice('error', err.message || '更新常用状态失败')
+  } finally {
+    busy.favoriteMp = ''
   }
 }
 
@@ -1192,6 +1272,61 @@ onBeforeUnmount(() => {
               <p class="confirm-card__tip">
                 任务提交后在服务端后台执行，你可以离开当前页面，稍后回来继续查看结果。
               </p>
+            </div>
+
+            <div class="saved-mps">
+              <div class="saved-mps__head">
+                <h4>已保存公众号（可一键抓取）</h4>
+                <span>常用 {{ favoriteMps.length }} / {{ mps.length }}</span>
+              </div>
+
+              <div v-if="mps.length" class="saved-mps__list">
+                <article
+                  v-for="item in mps"
+                  :key="item.id"
+                  class="saved-mp-card"
+                  :class="{ 'saved-mp-card--favorite': item.is_favorite }"
+                >
+                  <img
+                    :src="proxiedImageUrl(item.avatar || qrPlaceholder)"
+                    alt="saved mp avatar"
+                    @load="markImageReady(proxiedImageUrl(item.avatar || qrPlaceholder))"
+                    @error="onImageError($event, proxiedImageUrl(item.avatar || qrPlaceholder))"
+                  />
+                  <div class="saved-mp-card__main">
+                    <div class="saved-mp-card__title">
+                      <strong>{{ item.nickname || '未命名公众号' }}</strong>
+                      <span class="saved-mp-card__tag" v-if="item.is_favorite">常用</span>
+                    </div>
+                    <p>{{ item.alias ? `@${item.alias}` : item.fakeid }}</p>
+                    <p class="sub">抓取次数 {{ item.use_count || 0 }} · 最近提交 {{ formatDateTime(item.last_used_at) }}</p>
+                  </div>
+                  <div class="saved-mp-card__actions">
+                    <button
+                      class="btn btn--primary"
+                      :disabled="busy.capture || !canCapture || hasActiveCaptureJob"
+                      @click="captureSavedMp(item)"
+                    >
+                      <span class="btn__inner">
+                        <AppIcon name="rocket" :size="14" />
+                        <span>抓取</span>
+                      </span>
+                    </button>
+                    <button
+                      class="btn"
+                      :disabled="busy.favoriteMp === item.id"
+                      @click="toggleFavoriteMp(item)"
+                    >
+                      <span class="btn__inner">
+                        <AppIcon name="target" :size="14" />
+                        <span>{{ item.is_favorite ? '取消常用' : '设为常用' }}</span>
+                      </span>
+                    </button>
+                  </div>
+                </article>
+              </div>
+
+              <p v-else class="empty">暂无已保存公众号，先搜索并提交一次抓取任务。</p>
             </div>
 
             <div class="capture-job" v-if="captureJob">

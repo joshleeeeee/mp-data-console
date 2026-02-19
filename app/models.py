@@ -43,6 +43,11 @@ class MPAccount(Base):
     avatar: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     intro: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_favorite: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    use_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_sync_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

@@ -1,6 +1,6 @@
 from collections.abc import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import settings
@@ -34,6 +34,39 @@ def init_db() -> None:
     from app import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _apply_runtime_migrations()
+
+
+def _apply_runtime_migrations() -> None:
+    if engine.dialect.name != "sqlite":
+        return
+
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if "mps" not in table_names:
+        return
+
+    existing_columns = {col["name"] for col in inspector.get_columns("mps")}
+    existing_indexes = {idx["name"] for idx in inspector.get_indexes("mps")}
+    statements: list[str] = []
+
+    if "is_favorite" not in existing_columns:
+        statements.append("ALTER TABLE mps ADD COLUMN is_favorite BOOLEAN DEFAULT 0")
+    if "use_count" not in existing_columns:
+        statements.append("ALTER TABLE mps ADD COLUMN use_count INTEGER DEFAULT 0")
+    if "last_used_at" not in existing_columns:
+        statements.append("ALTER TABLE mps ADD COLUMN last_used_at DATETIME")
+    if "ix_mps_is_favorite" not in existing_indexes:
+        statements.append(
+            "CREATE INDEX IF NOT EXISTS ix_mps_is_favorite ON mps (is_favorite)"
+        )
+
+    if not statements:
+        return
+
+    with engine.begin() as conn:
+        for stmt in statements:
+            conn.execute(text(stmt))
 
 
 def get_db() -> Generator[Session, None, None]:

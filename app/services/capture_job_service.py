@@ -168,6 +168,10 @@ class CaptureJobService:
         db.add(job)
         db.commit()
         db.refresh(job)
+        try:
+            article_service.mark_mp_used(db, mp)
+        except Exception:  # noqa: BLE001
+            db.rollback()
 
         self._mark_job_active(job.id)
         thread = threading.Thread(

@@ -76,17 +76,53 @@ class ArticleService:
         return mp
 
     def list_mps(
-        self, db: Session, offset: int = 0, limit: int = 20
+        self,
+        db: Session,
+        offset: int = 0,
+        limit: int = 20,
+        favorite_only: bool = False,
     ) -> tuple[list[MPAccount], int]:
         query = db.query(MPAccount)
+        if favorite_only:
+            query = query.filter(MPAccount.is_favorite.is_(True))
         total = query.count()
         rows = (
-            query.order_by(desc(MPAccount.updated_at)).offset(offset).limit(limit).all()
+            query.order_by(
+                desc(MPAccount.is_favorite),
+                desc(MPAccount.last_used_at),
+                desc(MPAccount.updated_at),
+            )
+            .offset(offset)
+            .limit(limit)
+            .all()
         )
         return rows, total
 
     def get_mp(self, db: Session, mp_id: str) -> MPAccount | None:
         return db.query(MPAccount).filter(MPAccount.id == mp_id).first()
+
+    def set_mp_favorite(
+        self, db: Session, mp_id: str, is_favorite: bool
+    ) -> MPAccount | None:
+        mp = self.get_mp(db, mp_id)
+        if not mp:
+            return None
+
+        mp.is_favorite = bool(is_favorite)
+        mp.updated_at = utcnow()
+        db.add(mp)
+        db.commit()
+        db.refresh(mp)
+        return mp
+
+    def mark_mp_used(self, db: Session, mp: MPAccount) -> MPAccount:
+        mp.use_count = max(0, int(mp.use_count or 0)) + 1
+        mp.last_used_at = utcnow()
+        mp.updated_at = utcnow()
+        db.add(mp)
+        db.commit()
+        db.refresh(mp)
+        return mp
 
     @staticmethod
     def _extract_from_publish_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:

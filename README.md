@@ -206,7 +206,8 @@ npm run dev
 
 - `GET /mps/search?keyword=关键词`
 - `POST /mps`
-- `GET /mps`
+- `GET /mps`（支持 `favorite_only=true` 仅看常用）
+- `PATCH /mps/{mp_id}/favorite`（设为/取消常用）
 - `POST /mps/{mp_id}/sync/jobs`（后台任务，推荐）
 - `GET /mps/sync/jobs`
 - `GET /mps/sync/jobs/{job_id}`
@@ -368,6 +369,77 @@ scripts/
   dev-down.sh     # 停止前后端
 data/             # 本地数据库/导出文件/缓存（默认不提交）
 ```
+
+## 数据字典（SQLite）
+
+### `mps`（公众号主表）
+
+`mps` 是“已保存公众号清单”表：用于记录你确认过的抓取目标，并作为 `articles.mp_id` 与 `capture_jobs.mp_id` 的归属主体。
+
+| 字段 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| `id` | `String(128)` | 主键 | 内部公众号 ID（如 `MP_WXS_xxx` / `MP_FAKE_xxx`） |
+| `fakeid` | `String(255)` | 唯一、索引、非空 | 微信后台 `fakeid`，核心识别字段 |
+| `biz` | `String(255)` | 唯一、可空 | 公众号 `biz`，可用于更稳定识别 |
+| `nickname` | `String(255)` | 索引、非空 | 公众号名称 |
+| `alias` | `String(255)` | 可空 | 公众号微信号（如 `gh_xxx` 或品牌号） |
+| `avatar` | `String(1024)` | 可空 | 头像 URL |
+| `intro` | `Text` | 可空 | 简介 |
+| `enabled` | `Boolean` | 默认 `true` | 是否启用（预留开关） |
+| `is_favorite` | `Boolean` | 默认 `false`、索引 | 是否常用公众号（前端可一键抓取） |
+| `use_count` | `Integer` | 默认 `0` | 提交抓取任务次数 |
+| `last_used_at` | `DateTime(timezone=True)` | 可空 | 最近一次提交抓取任务时间 |
+| `last_sync_at` | `DateTime(timezone=True)` | 可空 | 最近一次抓取完成时间 |
+| `created_at` | `DateTime(timezone=True)` | 非空 | 创建时间（UTC） |
+| `updated_at` | `DateTime(timezone=True)` | 非空 | 更新时间（UTC） |
+
+补充说明：
+
+- 新建/更新入口：`POST /api/v1/mps`
+- 列表查询入口：`GET /api/v1/mps`（支持 `favorite_only=true`）
+- 设为常用入口：`PATCH /api/v1/mps/{mp_id}/favorite`
+- 提交抓取任务入口：`POST /api/v1/mps/{mp_id}/sync/jobs`
+
+### `articles`（文章表）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | `String(255)` | 主键，通常由 `mp_id + aid` 组成 |
+| `mp_id` | `String(128)` | 归属公众号 ID（对应 `mps.id`） |
+| `title` | `String(1024)` | 标题 |
+| `url` | `String(2048)` | 原文链接（唯一） |
+| `publish_ts` | `BigInteger` | 发布时间戳 |
+| `content_html` | `Text` | 正文 HTML |
+| `content_text` | `Text` | 正文纯文本 |
+| `images_json` | `Text` | 正文图片列表（JSON） |
+| `created_at/updated_at` | `DateTime` | 创建/更新时间 |
+
+### `capture_jobs`（抓取任务表）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | `String(64)` | 任务 ID（`job_xxx`） |
+| `mp_id` | `String(128)` | 目标公众号 ID |
+| `status` | `String(32)` | `queued/running/success/failed` |
+| `requested_count` | `Integer` | 目标去重新增条数 |
+| `created_count/updated_count` | `Integer` | 新增/更新文章数 |
+| `duplicates_skipped` | `Integer` | 重复跳过数 |
+| `scanned_pages/max_pages` | `Integer` | 已扫页数/上限 |
+| `reached_target` | `Boolean` | 是否达成目标 |
+| `error` | `Text` | 失败原因 |
+| `created_at/started_at/finished_at` | `DateTime` | 任务时间线 |
+
+### `auth_sessions`（登录会话表）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | `Integer` | 主键（单行记录，固定为 1） |
+| `status` | `String(32)` | 登录状态（`logged_out/waiting_scan/scanned/logged_in/...`） |
+| `token` | `String(128)` | 微信后台 token |
+| `cookie_json` | `Text` | 登录 cookie（JSON） |
+| `account_name/account_avatar` | `String` | 当前账号信息 |
+| `last_error` | `Text` | 最近错误 |
+| `created_at/updated_at` | `DateTime` | 创建/更新时间 |
 
 ## FAQ
 

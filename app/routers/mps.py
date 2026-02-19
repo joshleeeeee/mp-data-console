@@ -2,7 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
-from app.schemas import ApiResponse, MPCreateRequest, MPSyncRequest, MPOut
+from app.schemas import (
+    ApiResponse,
+    MPCreateRequest,
+    MPFavoriteUpdateRequest,
+    MPSyncRequest,
+    MPOut,
+)
 from app.services.article_service import article_service
 from app.services.capture_job_service import capture_job_service
 from app.services.wechat_client import WeChatAuthError, wechat_client
@@ -44,17 +50,36 @@ def add_mp(payload: MPCreateRequest, db: Session = Depends(get_db)):
 def list_mps(
     offset: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
+    favorite_only: bool = Query(False, description="仅返回常用公众号"),
     db: Session = Depends(get_db),
 ):
-    rows, total = article_service.list_mps(db, offset=offset, limit=limit)
+    rows, total = article_service.list_mps(
+        db,
+        offset=offset,
+        limit=limit,
+        favorite_only=favorite_only,
+    )
     return ApiResponse(
         data={
             "total": total,
             "offset": offset,
             "limit": limit,
+            "favorite_only": favorite_only,
             "list": [MPOut.model_validate(item).model_dump() for item in rows],
         }
     )
+
+
+@router.patch("/{mp_id}/favorite", response_model=ApiResponse)
+def set_mp_favorite(
+    mp_id: str,
+    payload: MPFavoriteUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    mp = article_service.set_mp_favorite(db, mp_id, payload.is_favorite)
+    if not mp:
+        raise HTTPException(status_code=404, detail="公众号不存在")
+    return ApiResponse(data=MPOut.model_validate(mp).model_dump())
 
 
 @router.post("/{mp_id}/sync/jobs", response_model=ApiResponse)

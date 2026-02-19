@@ -593,6 +593,103 @@ textarea:focus {
   color: #3b5f5a;
 }
 
+.saved-mps {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.8);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.saved-mps__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.saved-mps__head h4 {
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.saved-mps__head span {
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+}
+
+.saved-mps__list {
+  max-height: min(38vh, 360px);
+  overflow: auto;
+  padding-right: 2px;
+  display: grid;
+  gap: 8px;
+}
+
+.saved-mp-card {
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.9);
+  padding: 8px;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.saved-mp-card--favorite {
+  border-color: #7ec9b3;
+  background: linear-gradient(120deg, rgba(236, 253, 245, 0.92), rgba(255, 255, 255, 0.92));
+}
+
+.saved-mp-card img {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  object-fit: cover;
+  border: 1px solid var(--line);
+}
+
+.saved-mp-card__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.saved-mp-card__main strong {
+  font-size: 0.92rem;
+}
+
+.saved-mp-card__main p {
+  margin: 2px 0 0;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+.saved-mp-card__main .sub {
+  font-size: 0.78rem;
+}
+
+.saved-mp-card__tag {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #166534;
+  background: #dcfce7;
+  border: 1px solid #86efac;
+}
+
+.saved-mp-card__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .capture-job {
   margin-top: 9px;
   border: 1px solid #b6d9cf;
@@ -1139,6 +1236,20 @@ tbody td span {
   }
 
   .article-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .saved-mp-card {
+    grid-template-columns: 1fr;
+  }
+
+  .saved-mp-card img {
+    width: 56px;
+    height: 56px;
+  }
+
+  .saved-mp-card__actions {
     flex-direction: row;
     flex-wrap: wrap;
   }
