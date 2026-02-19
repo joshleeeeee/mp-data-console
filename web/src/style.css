@@ -891,6 +891,40 @@ tbody td span {
   word-break: break-all;
 }
 
+.mcp-guide {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.82);
+  padding: 10px;
+}
+
+.mcp-guide h4 {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #0f766e;
+}
+
+.mcp-guide ol,
+.mcp-guide ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+}
+
+.mcp-guide li {
+  line-height: 1.45;
+}
+
+.mcp-guide code {
+  margin-right: 6px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.8rem;
+}
+
 .actions--mcp {
   margin-top: 10px;
 }
