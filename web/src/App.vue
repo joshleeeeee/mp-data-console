@@ -103,6 +103,8 @@ const mcp = reactive({
   database_path: '',
   config_json: '',
   file_path: '',
+  install_steps: [],
+  tools: [],
 })
 
 const imageReadyMap = reactive({})
@@ -914,6 +916,8 @@ async function loadMcpConfig() {
     mcp.server_name = data.server_name || ''
     mcp.database_path = data.database_path || ''
     mcp.config_json = data.config_json || ''
+    mcp.install_steps = Array.isArray(data.install_steps) ? data.install_steps : []
+    mcp.tools = Array.isArray(data.tools) ? data.tools : []
   } catch (err) {
     setNotice('error', err.message || '读取 MCP 配置失败')
   } finally {
@@ -927,6 +931,8 @@ async function generateMcpFile() {
     const data = await api('/ops/mcp/generate-file', { method: 'POST' })
     mcp.file_path = data.file_path || ''
     mcp.config_json = data.config_json || mcp.config_json
+    mcp.install_steps = Array.isArray(data.install_steps) ? data.install_steps : mcp.install_steps
+    mcp.tools = Array.isArray(data.tools) ? data.tools : mcp.tools
     setNotice('success', '配置文件已生成')
   } catch (err) {
     setNotice('error', err.message || '生成配置文件失败')
@@ -1444,6 +1450,23 @@ onBeforeUnmount(() => {
               <div><span>Server 名称</span><strong>{{ mcp.server_name || '-' }}</strong></div>
               <div><span>数据库路径</span><code>{{ mcp.database_path || '-' }}</code></div>
               <div v-if="mcp.file_path"><span>配置文件</span><code>{{ mcp.file_path }}</code></div>
+            </div>
+
+            <div class="mcp-guide" v-if="mcp.install_steps.length">
+              <h4>安装与接入步骤</h4>
+              <ol>
+                <li v-for="(step, idx) in mcp.install_steps" :key="`${idx}-${step}`">{{ step }}</li>
+              </ol>
+            </div>
+
+            <div class="mcp-guide" v-if="mcp.tools.length">
+              <h4>MCP 工具</h4>
+              <ul>
+                <li v-for="tool in mcp.tools" :key="tool.name">
+                  <code>{{ tool.name }}</code>
+                  <span>{{ tool.description }}</span>
+                </li>
+              </ul>
             </div>
 
             <div class="actions actions--mcp">

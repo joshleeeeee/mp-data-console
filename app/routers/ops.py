@@ -1,4 +1,5 @@
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,31 @@ from app.services.article_service import article_service
 from app.services.wechat_client import WeChatAuthError, wechat_client
 
 router = APIRouter(prefix="/ops", tags=["ops"])
+
+MCP_SERVER_NAME = "we-mp-mini-articles"
+MCP_SERVER_MODULE = "app.mcp_server"
+MCP_TOOL_DOCS = [
+    {
+        "name": "list_mps",
+        "description": "列出库内公众号及文章数量，支持关键词筛选",
+    },
+    {
+        "name": "list_articles_by_mp",
+        "description": "按公众号名或 mp_id 列出对应文章列表",
+    },
+    {
+        "name": "db_overview",
+        "description": "查看数据库中的公众号/文章数量和最新抓取文章",
+    },
+    {
+        "name": "search_articles",
+        "description": "按关键词检索文章标题/正文，并返回正文预览",
+    },
+    {
+        "name": "get_article_text",
+        "description": "按 article_id 或 url 读取文章全文文本",
+    },
+]
 
 
 TABLE_COMMENTS: dict[str, str] = {
@@ -95,6 +121,23 @@ def _resolve_sqlite_path() -> str:
     if not path.is_absolute():
         path = (Path.cwd() / path).resolve()
     return str(path)
+
+
+def _resolve_python_command() -> str:
+    executable = sys.executable.strip() if sys.executable else ""
+    return executable or "python3"
+
+
+def _build_mcp_install_steps(python_command: str, database_path: str) -> list[str]:
+    return [
+        "在项目根目录创建并激活虚拟环境（可选但推荐）",
+        "安装依赖：pip install -r requirements.txt",
+        (
+            "本地验证 MCP 服务可启动："
+            f'{python_command} -m {MCP_SERVER_MODULE} --db-path "{database_path}"'
+        ),
+        "将下方 MCP 配置粘贴到你的 MCP 客户端（如 Claude Desktop / Cursor）",
+    ]
 
 
 def _parse_search_columns(raw_columns: str, all_columns: list[str]) -> list[str]:
@@ -328,18 +371,19 @@ def read_db_table(
 
 @router.get("/mcp/config", response_model=ApiResponse)
 def get_mcp_config():
+    if not settings.database_url.startswith("sqlite:///"):
+        raise HTTPException(status_code=400, detail="当前 MCP 仅支持 SQLite 数据库")
+
     database_path = _resolve_sqlite_path()
-    server_name = "we-mp-mini-db"
+    server_name = MCP_SERVER_NAME
+    python_command = _resolve_python_command()
+    args = ["-m", MCP_SERVER_MODULE, "--db-path", database_path]
 
     config = {
         "mcpServers": {
             server_name: {
-                "command": "npx",
-                "args": [
-                    "-y",
-                    "@modelcontextprotocol/server-sqlite",
-                    database_path,
-                ],
+                "command": python_command,
+                "args": args,
             }
         }
     }
@@ -348,6 +392,13 @@ def get_mcp_config():
         data={
             "server_name": server_name,
             "database_path": database_path,
+            "python_command": python_command,
+            "launch_args": args,
+            "tools": MCP_TOOL_DOCS,
+            "install_steps": _build_mcp_install_steps(
+                python_command=python_command,
+                database_path=database_path,
+            ),
             "config": config,
             "config_json": json.dumps(config, ensure_ascii=False, indent=2),
         }
@@ -368,6 +419,9 @@ def generate_mcp_file():
             "file_path": str(output_file.resolve()),
             "server_name": data["server_name"],
             "database_path": data["database_path"],
+            "python_command": data.get("python_command", ""),
+            "install_steps": data.get("install_steps", []),
+            "tools": data.get("tools", []),
             "config_json": data["config_json"],
         }
     )
