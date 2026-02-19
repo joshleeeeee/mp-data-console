@@ -39,6 +39,10 @@ class MPSyncRequest(BaseModel):
     target_count: int | None = Field(default=None, ge=1, le=250)
 
 
+class MPFavoriteUpdateRequest(BaseModel):
+    is_favorite: bool
+
+
 class MPOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -50,6 +54,9 @@ class MPOut(BaseModel):
     avatar: str | None = None
     intro: str | None = None
     enabled: bool
+    is_favorite: bool = False
+    use_count: int = 0
+    last_used_at: datetime | None = None
     last_sync_at: datetime | None = None
     created_at: datetime
     updated_at: datetime

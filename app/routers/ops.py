@@ -66,6 +66,9 @@ COLUMN_COMMENTS: dict[str, dict[str, str]] = {
         "nickname": "公众号名称",
         "alias": "公众号微信号",
         "avatar": "头像链接",
+        "is_favorite": "是否常用公众号",
+        "use_count": "提交抓取任务次数",
+        "last_used_at": "最近一次提交抓取时间",
         "last_sync_at": "最近同步时间",
     },
     "articles": {
