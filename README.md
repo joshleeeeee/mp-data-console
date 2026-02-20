@@ -37,6 +37,14 @@
 | AI 接入 | 复制粘贴给模型，链路不稳定 | MCP 工具直连，查询与分析可复现 |
 | 产出效率 | 人工通读，耗时高 | AI 先筛选再深读，显著缩短分析周期 |
 
+## 界面预览
+
+<!-- README_IMAGES:START -->
+| 抓取视图 | MCP 接入 | 数据库 |
+| --- | --- | --- |
+| ![抓取视图](images/capture-view.png) | ![MCP 接入](images/mcp-view.png) | ![数据库](images/database-view.png) |
+<!-- README_IMAGES:END -->
+
 ## 核心能力
 
 ### 抓取链路
