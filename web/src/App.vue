@@ -49,10 +49,127 @@ const busy = reactive({
 const qrImageUrl = ref('')
 const isPolling = ref(false)
 
+const captureRangeMaxPages = 300
+const savedMpQuickRangeDays = [7, 30, 90, 180]
+
+function toDateInputValue(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    return ''
+  }
+
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function parseDateInputValue(rawValue) {
+  const text = String(rawValue || '').trim()
+  const matched = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text)
+  if (!matched) {
+    return null
+  }
+
+  const year = Number(matched[1])
+  const month = Number(matched[2])
+  const day = Number(matched[3])
+  const date = new Date(year, month - 1, day)
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    return null
+  }
+
+  return date
+}
+
+function todayDateInputValue() {
+  return toDateInputValue(new Date())
+}
+
+function daysAgoDateInputValue(days) {
+  const safeDays = Math.max(0, Math.floor(Number(days) || 0))
+  const date = new Date()
+  date.setDate(date.getDate() - safeDays)
+  return toDateInputValue(date)
+}
+
+function normalizeRangeDays(rawValue, fallback = 30) {
+  const parsed = Math.floor(Number(rawValue))
+  if (Number.isFinite(parsed) && parsed >= 1) {
+    return Math.min(365, parsed)
+  }
+
+  const fallbackParsed = Math.floor(Number(fallback))
+  if (Number.isFinite(fallbackParsed) && fallbackParsed >= 1) {
+    return Math.min(365, fallbackParsed)
+  }
+
+  return 30
+}
+
+function buildRecentRangeByDays(days) {
+  const rangeDays = normalizeRangeDays(days, 30)
+  const date_end = todayDateInputValue()
+  const date_start = daysAgoDateInputValue(rangeDays - 1)
+  return {
+    range_days: rangeDays,
+    date_start,
+    date_end,
+  }
+}
+
+function normalizeDateRange(startRaw, endRaw) {
+  const fallback = buildRecentRangeByDays(30)
+  const parsedStart = parseDateInputValue(startRaw)
+  const parsedEnd = parseDateInputValue(endRaw)
+
+  let date_start = parsedStart ? toDateInputValue(parsedStart) : fallback.date_start
+  let date_end = parsedEnd ? toDateInputValue(parsedEnd) : fallback.date_end
+
+  if (date_start > date_end) {
+    const temp = date_start
+    date_start = date_end
+    date_end = temp
+  }
+
+  return {
+    date_start,
+    date_end,
+  }
+}
+
+function rangeDaysBetween(startRaw, endRaw) {
+  const range = normalizeDateRange(startRaw, endRaw)
+  const start = parseDateInputValue(range.date_start)
+  const end = parseDateInputValue(range.date_end)
+  if (!start || !end) {
+    return 1
+  }
+  start.setHours(12, 0, 0, 0)
+  end.setHours(12, 0, 0, 0)
+  const diff = Math.floor((end.getTime() - start.getTime()) / 86400000)
+  return Math.max(1, diff + 1)
+}
+
+function formatTimestampDate(ts) {
+  const value = Number(ts)
+  if (!Number.isFinite(value) || value <= 0) {
+    return ''
+  }
+  const date = new Date(value * 1000)
+  return toDateInputValue(date)
+}
+
+const defaultCaptureRange = buildRecentRangeByDays(30)
+
 const captureForm = reactive({
   keyword: '',
-  capture_count: 20,
-  fetch_content: true,
+  range_start: defaultCaptureRange.date_start,
+  range_end: defaultCaptureRange.date_end,
 })
 
 const mpCandidates = ref([])
@@ -105,6 +222,15 @@ const dbView = reactive({
 const dbLimitOptions = [20, 50, 100, 200]
 const articleLimitOptions = [12, 24, 48, 96]
 const articleLimitStorageKey = 'wemp.console.article.limit'
+const savedMpCaptureStorageKey = 'wemp.console.saved.mp.capture'
+const customCaptureRangesStorageKey = 'wemp.console.capture.custom.ranges'
+const maxCustomCaptureRanges = 12
+const defaultSavedMpCaptureConfig = {
+  range_days: 30,
+}
+
+const savedMpCaptureConfigs = ref({})
+const customCaptureRanges = ref([])
 
 const selectedDbRowKeys = ref([])
 
@@ -193,33 +319,55 @@ const summaryCards = computed(() => [
   { label: '状态', value: currentStatus.value.label, icon: 'shield' },
 ])
 
-const captureCount = computed(() => {
-  const raw = Number(captureForm.capture_count)
-  if (!Number.isFinite(raw) || raw <= 0) {
-    return 1
-  }
-  return Math.min(250, Math.floor(raw))
-})
-
-const capturePages = computed(() => {
-  return Math.max(1, Math.ceil(captureCount.value / 5))
+const captureFormRange = computed(() => {
+  return normalizeDateRange(captureForm.range_start, captureForm.range_end)
 })
 
 const estimatedCaptureRange = computed(() => {
-  return `目标抓取 ${captureCount.value} 条去重文章（重复不计入）`
+  const range = captureFormRange.value
+  const days = rangeDaysBetween(range.date_start, range.date_end)
+  return `${range.date_start} ~ ${range.date_end}（共 ${days} 天）`
 })
+
+function captureDateRangeText(startTs, endTs) {
+  const start = formatTimestampDate(startTs)
+  const end = formatTimestampDate(endTs)
+  if (start && end) {
+    return `${start} ~ ${end}`
+  }
+  return start || end || ''
+}
+
+function captureTargetText(payload) {
+  if (!payload) {
+    return ''
+  }
+
+  const dateRangeText = captureDateRangeText(payload.start_ts, payload.end_ts)
+  if (dateRangeText) {
+    return `范围 ${dateRangeText}`
+  }
+
+  const requested = Number(payload.requested_count || 0)
+  if (requested > 0) {
+    return `目标 ${requested} 条`
+  }
+
+  return '按时间范围'
+}
 
 const captureJobProgressText = computed(() => {
   if (!captureJob.value) {
     return ''
   }
-  const requested = Number(captureJob.value.requested_count || 0)
+
+  const targetText = captureTargetText(captureJob.value)
   const created = Number(captureJob.value.created || 0)
   const scanned = Number(captureJob.value.scanned_pages || 0)
   const maxPages = Number(captureJob.value.max_pages || 0)
   const duplicated = Number(captureJob.value.duplicates_skipped || 0)
   const pageText = maxPages > 0 ? `${scanned}/${maxPages}` : `${scanned}`
-  return `目标 ${requested} · 新增 ${created} · 跳过重复 ${duplicated} · 扫描页数 ${pageText}`
+  return `${targetText} · 新增 ${created} · 跳过重复 ${duplicated} · 扫描页数 ${pageText}`
 })
 
 const dbRangeText = computed(() => {
@@ -360,6 +508,268 @@ function saveArticleLimitPreference() {
   try {
     localStorage.setItem(articleLimitStorageKey, String(articleFilter.limit))
   } catch {}
+}
+
+function customCaptureRangeKey(range) {
+  if (!range) {
+    return ''
+  }
+  return `${range.date_start || ''}|${range.date_end || ''}`
+}
+
+function normalizeCustomCaptureRange(rawRange = {}) {
+  const source = rawRange && typeof rawRange === 'object' ? rawRange : {}
+  const normalized = normalizeDateRange(source.date_start, source.date_end)
+  const rawId = typeof source.id === 'string' ? source.id.trim() : ''
+
+  return {
+    id: rawId || `range_${normalized.date_start}_${normalized.date_end}`,
+    date_start: normalized.date_start,
+    date_end: normalized.date_end,
+  }
+}
+
+function loadCustomCaptureRangesPreference() {
+  try {
+    const raw = localStorage.getItem(customCaptureRangesStorageKey)
+    if (!raw) {
+      return
+    }
+
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) {
+      return
+    }
+
+    const seen = new Set()
+    const normalized = []
+    for (const item of parsed) {
+      const row = normalizeCustomCaptureRange(item)
+      const key = customCaptureRangeKey(row)
+      if (!key || seen.has(key)) {
+        continue
+      }
+      seen.add(key)
+      normalized.push(row)
+      if (normalized.length >= maxCustomCaptureRanges) {
+        break
+      }
+    }
+
+    customCaptureRanges.value = normalized
+  } catch {
+    customCaptureRanges.value = []
+  }
+}
+
+function saveCustomCaptureRangesPreference() {
+  try {
+    localStorage.setItem(customCaptureRangesStorageKey, JSON.stringify(customCaptureRanges.value))
+  } catch {}
+}
+
+function customCaptureRangeLabel(range) {
+  const normalized = normalizeCustomCaptureRange(range)
+  const days = rangeDaysBetween(normalized.date_start, normalized.date_end)
+  return `${normalized.date_start} ~ ${normalized.date_end}（${days} 天）`
+}
+
+function isCustomCaptureRangeActive(range) {
+  const current = captureFormRange.value
+  const normalized = normalizeCustomCaptureRange(range)
+  return current.date_start === normalized.date_start && current.date_end === normalized.date_end
+}
+
+function applyCustomCaptureRange(range) {
+  const normalized = normalizeCustomCaptureRange(range)
+  captureForm.range_start = normalized.date_start
+  captureForm.range_end = normalized.date_end
+}
+
+function saveCurrentCaptureRangeAsCustom() {
+  const normalized = normalizeCustomCaptureRange(captureFormRange.value)
+  const key = customCaptureRangeKey(normalized)
+  const currentList = customCaptureRanges.value
+  const existingIndex = currentList.findIndex((item) => customCaptureRangeKey(item) === key)
+
+  if (existingIndex === 0) {
+    setNotice('info', '该时间范围已在自定义列表')
+    return
+  }
+
+  const existing = existingIndex >= 0 ? normalizeCustomCaptureRange(currentList[existingIndex]) : null
+  const nextItem =
+    existing ||
+    {
+      ...normalized,
+      id: `range_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+    }
+
+  const next = [
+    nextItem,
+    ...currentList.filter((item, index) => {
+      if (index === existingIndex) {
+        return false
+      }
+      return customCaptureRangeKey(item) !== key
+    }),
+  ].slice(0, maxCustomCaptureRanges)
+
+  customCaptureRanges.value = next
+  saveCustomCaptureRangesPreference()
+  setNotice('success', '已保存到自定义时间范围')
+}
+
+function removeCustomCaptureRange(rangeId) {
+  if (!rangeId) {
+    return
+  }
+  const next = customCaptureRanges.value.filter((item) => item.id !== rangeId)
+  if (next.length === customCaptureRanges.value.length) {
+    return
+  }
+  customCaptureRanges.value = next
+  saveCustomCaptureRangesPreference()
+}
+
+function clearCustomCaptureRanges() {
+  if (!customCaptureRanges.value.length) {
+    return
+  }
+  customCaptureRanges.value = []
+  saveCustomCaptureRangesPreference()
+}
+
+function normalizeSavedMpCaptureConfig(rawConfig = {}, fallbackConfig = defaultSavedMpCaptureConfig) {
+  const source = rawConfig && typeof rawConfig === 'object' ? rawConfig : {}
+
+  return {
+    range_days: normalizeRangeDays(source.range_days, fallbackConfig.range_days),
+  }
+}
+
+function loadSavedMpCapturePreference() {
+  try {
+    const raw = localStorage.getItem(savedMpCaptureStorageKey)
+    if (!raw) {
+      return
+    }
+
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return
+    }
+
+    const normalized = {}
+    for (const [mpId, config] of Object.entries(parsed)) {
+      if (!mpId) {
+        continue
+      }
+      normalized[mpId] = normalizeSavedMpCaptureConfig(config, defaultSavedMpCaptureConfig)
+    }
+
+    savedMpCaptureConfigs.value = normalized
+  } catch {
+    savedMpCaptureConfigs.value = {}
+  }
+}
+
+function saveSavedMpCapturePreference() {
+  try {
+    localStorage.setItem(savedMpCaptureStorageKey, JSON.stringify(savedMpCaptureConfigs.value))
+  } catch {}
+}
+
+function getSavedMpCaptureConfig(mpId) {
+  if (!mpId) {
+    return { ...defaultSavedMpCaptureConfig }
+  }
+
+  const config = savedMpCaptureConfigs.value[mpId]
+  if (!config) {
+    return { ...defaultSavedMpCaptureConfig }
+  }
+
+  return normalizeSavedMpCaptureConfig(config, defaultSavedMpCaptureConfig)
+}
+
+function setSavedMpCaptureConfig(mpId, patch = {}) {
+  if (!mpId) {
+    return
+  }
+
+  const current = getSavedMpCaptureConfig(mpId)
+  const next = normalizeSavedMpCaptureConfig(
+    {
+      range_days: patch.range_days === undefined ? current.range_days : patch.range_days,
+    },
+    current,
+  )
+
+  savedMpCaptureConfigs.value = {
+    ...savedMpCaptureConfigs.value,
+    [mpId]: next,
+  }
+  saveSavedMpCapturePreference()
+}
+
+function setSavedMpCaptureDays(mpId, nextDays) {
+  setSavedMpCaptureConfig(mpId, { range_days: nextDays })
+}
+
+function savedMpCaptureDays(item) {
+  return getSavedMpCaptureConfig(item?.id).range_days
+}
+
+function savedMpCaptureOptionList(item) {
+  const current = savedMpCaptureDays(item)
+  if (savedMpQuickRangeDays.includes(current)) {
+    return savedMpQuickRangeDays
+  }
+  return [...savedMpQuickRangeDays, current].sort((a, b) => a - b)
+}
+
+function savedMpCaptureButtonText(item) {
+  const rangeDays = savedMpCaptureDays(item)
+  return `抓取近 ${rangeDays} 天`
+}
+
+function resolveCaptureJobOptions(options = null) {
+  const fallbackRange = captureFormRange.value
+
+  let date_start = fallbackRange.date_start
+  let date_end = fallbackRange.date_end
+  let range_days = rangeDaysBetween(date_start, date_end)
+
+  if (options && (options.date_start !== undefined || options.date_end !== undefined)) {
+    const normalized = normalizeDateRange(
+      options.date_start === undefined ? fallbackRange.date_start : options.date_start,
+      options.date_end === undefined ? fallbackRange.date_end : options.date_end,
+    )
+    date_start = normalized.date_start
+    date_end = normalized.date_end
+    range_days = rangeDaysBetween(date_start, date_end)
+  } else if (options && options.range_days !== undefined && options.range_days !== null) {
+    const relativeRange = buildRecentRangeByDays(options.range_days)
+    date_start = relativeRange.date_start
+    date_end = relativeRange.date_end
+    range_days = relativeRange.range_days
+  }
+
+  return {
+    range_days,
+    date_start,
+    date_end,
+    fetch_content: true,
+    pages: captureRangeMaxPages,
+    target_count: null,
+  }
+}
+
+function applyCapturePresetRangeDays(days) {
+  const range = buildRecentRangeByDays(days)
+  captureForm.range_start = range.date_start
+  captureForm.range_end = range.date_end
 }
 
 function applySession(data = {}) {
@@ -555,7 +965,9 @@ function buildCaptureResultFromJob(job) {
       scanned_pages: Number(job?.scanned_pages || 0),
       pages: Number(job?.pages_hint || 0),
     },
-    requested_count: Number(job?.requested_count || captureCount.value),
+    requested_count: Number(job?.requested_count || 0),
+    start_ts: Number(job?.start_ts || 0),
+    end_ts: Number(job?.end_ts || 0),
     reached_target: Boolean(job?.reached_target),
   }
 }
@@ -587,12 +999,13 @@ async function applyCaptureJobUpdate(job, silent = false) {
     await Promise.all([loadOverview(), loadMps(), loadArticles()])
 
     if (!silent && lastCaptureJobNoticeId !== job.id) {
-      if (job.reached_target) {
+      const requested = Number(job.requested_count || 0)
+      if (job.reached_target || requested <= 0) {
         setNotice('success', '后台抓取完成，结果已更新')
       } else {
         setNotice(
           'warn',
-          `后台抓取完成：目标 ${job.requested_count} 条，实际新增 ${job.created} 条（可能源数据不足）`,
+          `后台抓取完成：目标 ${requested} 条，实际新增 ${job.created} 条（可能源数据不足）`,
         )
       }
       lastCaptureJobNoticeId = job.id
@@ -782,13 +1195,16 @@ function chooseCandidate(item) {
   selectedCandidate.value = item
 }
 
-async function submitCaptureJobByMpId(mpId) {
+async function submitCaptureJobByMpId(mpId, options = null) {
+  const resolved = resolveCaptureJobOptions(options)
   const job = await api(`/mps/${encodeURIComponent(mpId)}/sync/jobs`, {
     method: 'POST',
     body: {
-      pages: capturePages.value,
-      target_count: captureCount.value,
-      fetch_content: Boolean(captureForm.fetch_content),
+      pages: resolved.pages,
+      target_count: resolved.target_count,
+      date_start: resolved.date_start,
+      date_end: resolved.date_end,
+      fetch_content: resolved.fetch_content,
     },
   })
 
@@ -816,6 +1232,10 @@ async function confirmCapture() {
   busy.capture = true
   try {
     const candidate = selectedCandidate.value
+    const captureOptions = resolveCaptureJobOptions({
+      date_start: captureForm.range_start,
+      date_end: captureForm.range_end,
+    })
     const saved = await api('/mps', {
       method: 'POST',
       body: {
@@ -828,7 +1248,8 @@ async function confirmCapture() {
       },
     })
 
-    await submitCaptureJobByMpId(saved.id)
+    await submitCaptureJobByMpId(saved.id, captureOptions)
+    setSavedMpCaptureConfig(saved.id, { range_days: captureOptions.range_days })
     setNotice('info', '抓取任务已提交到后台，页面可关闭或切换，稍后回来查看结果')
   } catch (err) {
     setNotice('error', err.message || '抓取失败')
@@ -853,8 +1274,12 @@ async function captureSavedMp(item) {
 
   busy.capture = true
   try {
-    await submitCaptureJobByMpId(item.id)
-    setNotice('info', `已为 ${item.nickname || '目标公众号'} 提交抓取任务`)
+    const captureOptions = resolveCaptureJobOptions({
+      range_days: savedMpCaptureDays(item),
+    })
+    await submitCaptureJobByMpId(item.id, captureOptions)
+    setSavedMpCaptureConfig(item.id, { range_days: captureOptions.range_days })
+    setNotice('info', `已为 ${item.nickname || '目标公众号'} 提交抓取任务（近 ${captureOptions.range_days} 天）`)
   } catch (err) {
     setNotice('error', err.message || '提交抓取失败')
   } finally {
@@ -1472,6 +1897,8 @@ async function copyText(text, label = '内容') {
 onMounted(async () => {
   busy.boot = true
   loadArticleLimitPreference()
+  loadSavedMpCapturePreference()
+  loadCustomCaptureRangesPreference()
   await Promise.all([
     loadSession(),
     loadOverview(),
@@ -1640,7 +2067,7 @@ onBeforeUnmount(() => {
 
               <div class="quick-result" v-if="captureResult">
                 <p>
-                  已写入 <strong>{{ captureResult.mp.nickname }}</strong>，目标去重 {{ captureResult.requested_count }} 条，
+                  已写入 <strong>{{ captureResult.mp.nickname }}</strong>，{{ captureTargetText(captureResult) }}，
                   新增 {{ captureResult.sync.created }}，更新 {{ captureResult.sync.updated }}，
                   跳过重复 {{ captureResult.sync.duplicates_skipped || 0 }}，
                   扫描 {{ captureResult.sync.scanned_pages || captureResult.sync.pages }} 页。
@@ -1673,6 +2100,21 @@ onBeforeUnmount(() => {
                       </div>
                       <p>{{ item.alias ? `@${item.alias}` : item.fakeid }}</p>
                       <p class="sub">抓取次数 {{ item.use_count || 0 }} · 最近提交 {{ formatDateTime(item.last_used_at) }}</p>
+                      <div class="saved-mp-card__controls">
+                        <span class="saved-mp-card__control-label">时间范围</span>
+                        <div class="saved-mp-card__count-options">
+                          <button
+                            v-for="count in savedMpCaptureOptionList(item)"
+                            :key="`${item.id}-${count}`"
+                            type="button"
+                            class="saved-mp-card__count-btn"
+                            :class="{ 'saved-mp-card__count-btn--active': savedMpCaptureDays(item) === count }"
+                            @click="setSavedMpCaptureDays(item.id, count)"
+                          >
+                            近 {{ count }} 天
+                          </button>
+                        </div>
+                      </div>
                     </div>
                     <div class="saved-mp-card__actions">
                       <button
@@ -1682,7 +2124,7 @@ onBeforeUnmount(() => {
                       >
                         <span class="btn__inner">
                           <AppIcon name="rocket" :size="14" />
-                          <span>抓取</span>
+                          <span>{{ busy.capture ? '提交中...' : savedMpCaptureButtonText(item) }}</span>
                         </span>
                       </button>
                       <button
@@ -1709,7 +2151,7 @@ onBeforeUnmount(() => {
           <div class="capture-column">
             <article class="panel">
             <header class="panel__head">
-              <h3 class="title-row"><AppIcon name="target" :size="16" /> 选择公众号与抓取参数</h3>
+              <h3 class="title-row"><AppIcon name="target" :size="16" /> 选择公众号与抓取范围</h3>
               <div class="actions">
                 <input
                   v-model="captureForm.keyword"
@@ -1776,13 +2218,38 @@ onBeforeUnmount(() => {
 
               <div class="confirm-card__ops">
                 <label>
-                  抓取条数
-                  <input v-model.number="captureForm.capture_count" type="number" min="1" max="250" />
+                  开始日期
+                  <input v-model="captureForm.range_start" type="date" />
                 </label>
-                <label class="check">
-                  <input v-model="captureForm.fetch_content" type="checkbox" />
-                  抓正文
+                <label>
+                  结束日期
+                  <input v-model="captureForm.range_end" type="date" />
                 </label>
+                <div class="saved-mp-card__count-options">
+                  <button
+                    v-for="days in savedMpQuickRangeDays"
+                    :key="`capture-range-${days}`"
+                    type="button"
+                    class="saved-mp-card__count-btn"
+                    @click="applyCapturePresetRangeDays(days)"
+                  >
+                    近 {{ days }} 天
+                  </button>
+                </div>
+                <div class="capture-custom-range-tools">
+                  <button class="btn" type="button" @click="saveCurrentCaptureRangeAsCustom">
+                    <span class="btn__inner">
+                      <AppIcon name="file-plus" :size="14" />
+                      <span>保存为自定义</span>
+                    </span>
+                  </button>
+                  <button v-if="customCaptureRanges.length" class="btn" type="button" @click="clearCustomCaptureRanges">
+                    <span class="btn__inner">
+                      <AppIcon name="x" :size="14" />
+                      <span>清空自定义</span>
+                    </span>
+                  </button>
+                </div>
                 <span class="capture-estimate"><AppIcon name="calendar" :size="13" /> {{ estimatedCaptureRange }}</span>
                 <button
                   class="btn btn--primary"
@@ -1798,6 +2265,22 @@ onBeforeUnmount(() => {
                     </span>
                   </span>
                 </button>
+              </div>
+
+              <div class="capture-custom-range-list" v-if="customCaptureRanges.length">
+                <div class="capture-custom-range-item" v-for="item in customCaptureRanges" :key="item.id">
+                  <button
+                    type="button"
+                    class="saved-mp-card__count-btn"
+                    :class="{ 'saved-mp-card__count-btn--active': isCustomCaptureRangeActive(item) }"
+                    @click="applyCustomCaptureRange(item)"
+                  >
+                    {{ customCaptureRangeLabel(item) }}
+                  </button>
+                  <button type="button" class="capture-custom-range-remove" @click="removeCustomCaptureRange(item.id)">
+                    删除
+                  </button>
+                </div>
               </div>
 
               <p class="confirm-card__tip">

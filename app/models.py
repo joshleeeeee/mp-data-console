@@ -102,6 +102,8 @@ class CaptureJob(Base):
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
     pages_hint: Mapped[int] = mapped_column(Integer, default=1)
     requested_count: Mapped[int] = mapped_column(Integer, default=20)
+    start_ts: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    end_ts: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     fetch_content: Mapped[bool] = mapped_column(Boolean, default=True)
 
     created_count: Mapped[int] = mapped_column(Integer, default=0)

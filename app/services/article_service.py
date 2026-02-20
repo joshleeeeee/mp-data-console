@@ -222,6 +222,8 @@ class ArticleService:
         pages: int = 1,
         fetch_content: bool = True,
         target_count: int | None = None,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         created_count = 0
@@ -229,11 +231,29 @@ class ArticleService:
         content_updated_count = 0
 
         base_pages = max(1, int(pages))
+        range_start_ts = int(start_ts) if start_ts is not None else None
+        range_end_ts = int(end_ts) if end_ts is not None else None
+        if (
+            range_start_ts is not None
+            and range_end_ts is not None
+            and range_start_ts > range_end_ts
+        ):
+            range_start_ts, range_end_ts = range_end_ts, range_start_ts
+
+        has_date_range = range_start_ts is not None or range_end_ts is not None
         requested_unique = (
-            max(1, int(target_count)) if target_count is not None else base_pages * 5
+            0
+            if has_date_range
+            else (
+                max(1, int(target_count))
+                if target_count is not None
+                else base_pages * 5
+            )
         )
 
-        if target_count is not None:
+        if has_date_range:
+            max_pages = min(300, base_pages)
+        elif target_count is not None:
             estimated_pages = max(1, (requested_unique + 4) // 5)
             max_pages = min(300, max(base_pages, estimated_pages * 4))
         else:
@@ -243,6 +263,7 @@ class ArticleService:
         duplicates_skipped = 0
         seen_keys: set[str] = set()
         reached_target = False
+        reached_range_start = False
 
         def emit_progress() -> None:
             if not progress_callback:
@@ -258,6 +279,8 @@ class ArticleService:
                         "max_pages": max_pages,
                         "requested_unique": requested_unique,
                         "reached_target": reached_target,
+                        "range_start_ts": range_start_ts,
+                        "range_end_ts": range_end_ts,
                     }
                 )
             except Exception:
@@ -281,6 +304,24 @@ class ArticleService:
                 break
 
             for item in records:
+                item_publish_ts = self._safe_int(
+                    item.get("update_time") or item.get("create_time")
+                )
+                if (
+                    range_end_ts is not None
+                    and item_publish_ts is not None
+                    and item_publish_ts > range_end_ts
+                ):
+                    continue
+                if (
+                    range_start_ts is not None
+                    and item_publish_ts is not None
+                    and item_publish_ts < range_start_ts
+                ):
+                    reached_range_start = True
+                    reached_target = True
+                    break
+
                 url = (item.get("link") or item.get("url") or "").strip()
                 if not url:
                     continue
@@ -318,7 +359,7 @@ class ArticleService:
                     article.updated_at = utcnow()
                     content_updated_count += 1
 
-                if created_count >= requested_unique:
+                if not has_date_range and created_count >= requested_unique:
                     reached_target = True
                     break
 
@@ -326,6 +367,9 @@ class ArticleService:
             emit_progress()
 
             if reached_target:
+                break
+
+            if reached_range_start:
                 break
 
             time.sleep(0.4)
@@ -345,6 +389,8 @@ class ArticleService:
             "requested_unique": requested_unique,
             "reached_target": reached_target,
             "duplicates_skipped": duplicates_skipped,
+            "start_ts": range_start_ts,
+            "end_ts": range_end_ts,
         }
 
     def fetch_article_detail(self, db: Session, article_url: str) -> dict[str, Any]:

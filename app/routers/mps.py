@@ -1,3 +1,5 @@
+from datetime import date, datetime, time, timedelta, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -14,6 +16,20 @@ from app.services.capture_job_service import capture_job_service
 from app.services.wechat_client import WeChatAuthError, wechat_client
 
 router = APIRouter(prefix="/mps", tags=["mps"])
+
+CHINA_TZ = timezone(timedelta(hours=8))
+
+
+def _date_start_to_ts(value: date | None) -> int | None:
+    if value is None:
+        return None
+    return int(datetime.combine(value, time.min, tzinfo=CHINA_TZ).timestamp())
+
+
+def _date_end_to_ts(value: date | None) -> int | None:
+    if value is None:
+        return None
+    return int(datetime.combine(value, time.max, tzinfo=CHINA_TZ).timestamp())
 
 
 @router.get("/search", response_model=ApiResponse)
@@ -88,6 +104,9 @@ def create_sync_job(mp_id: str, payload: MPSyncRequest, db: Session = Depends(ge
     if not mp:
         raise HTTPException(status_code=404, detail="公众号不存在")
 
+    start_ts = _date_start_to_ts(payload.date_start)
+    end_ts = _date_end_to_ts(payload.date_end)
+
     try:
         wechat_client.ensure_login(db)
         job = capture_job_service.create_job(
@@ -96,6 +115,8 @@ def create_sync_job(mp_id: str, payload: MPSyncRequest, db: Session = Depends(ge
             pages=payload.pages,
             fetch_content=payload.fetch_content,
             target_count=payload.target_count,
+            start_ts=start_ts,
+            end_ts=end_ts,
         )
         return ApiResponse(data=job)
     except WeChatAuthError as exc:
@@ -137,6 +158,9 @@ def sync_mp(mp_id: str, payload: MPSyncRequest, db: Session = Depends(get_db)):
     if not mp:
         raise HTTPException(status_code=404, detail="公众号不存在")
 
+    start_ts = _date_start_to_ts(payload.date_start)
+    end_ts = _date_end_to_ts(payload.date_end)
+
     try:
         result = article_service.sync_mp_articles(
             db,
@@ -144,6 +168,8 @@ def sync_mp(mp_id: str, payload: MPSyncRequest, db: Session = Depends(get_db)):
             pages=payload.pages,
             fetch_content=payload.fetch_content,
             target_count=payload.target_count,
+            start_ts=start_ts,
+            end_ts=end_ts,
         )
         return ApiResponse(data=result)
     except WeChatAuthError as exc:
