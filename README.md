@@ -53,6 +53,7 @@
 - 公众号搜索与抓取前确认（头像、别名、时间范围）
 - 后台抓取任务（`queued/running/canceling/success/failed/canceled`）
 - 时间范围抓取：只按 `date_start ~ date_end` 设定抓取窗口
+- 常用公众号自动同步：支持按频率增量抓取（回看天数 + 重叠小时）与全局开关
 - 任务中心：任务历史、筛选、详情日志、取消与重试
 
 ### 内容与导出
@@ -298,6 +299,7 @@ npm run dev
 - `POST /mps`
 - `GET /mps`（支持 `favorite_only=true` 仅看常用）
 - `PATCH /mps/{mp_id}/favorite`（设为/取消常用）
+- `PATCH /mps/{mp_id}/auto-sync`（配置自动同步策略）
 - `POST /mps/{mp_id}/sync/jobs`（后台任务，推荐）
 - `GET /mps/sync/jobs`
 - `GET /mps/sync/jobs/{job_id}`
@@ -319,6 +321,9 @@ npm run dev
 
 - `GET /ops/overview`
 - `POST /ops/quick-sync`
+- `GET /ops/auto-sync/status`
+- `PATCH /ops/auto-sync/enabled`
+- `POST /ops/auto-sync/run-now`
 - `GET /ops/db/tables`
 - `GET /ops/db/table/{table_name}`
 - `GET /ops/mcp/config`
@@ -502,6 +507,12 @@ curl "http://127.0.0.1:18011/api/v1/mps/sync/jobs/<job_id>"
 | `DATABASE_URL` | `sqlite:///./data/wechat_mini.db` | SQLite 地址 |
 | `REQUEST_TIMEOUT` | `20` | 微信请求超时（秒） |
 | `VERIFY_SSL` | `true` | 是否校验证书 |
+| `AUTO_SYNC_ENABLED` | `true` | 是否启用自动同步调度器 |
+| `AUTO_SYNC_TICK_SECONDS` | `45` | 调度器轮询周期（秒） |
+| `AUTO_SYNC_SCAN_LIMIT` | `10` | 每轮最多扫描候选公众号数量 |
+| `AUTO_SYNC_DISPATCH_JITTER_SECONDS` | `180` | 下次执行随机抖动上限（秒） |
+| `AUTO_SYNC_FAILURE_BACKOFF_BASE_MINUTES` | `15` | 自动同步失败退避基数（分钟） |
+| `AUTO_SYNC_FAILURE_BACKOFF_MAX_MINUTES` | `360` | 自动同步失败退避上限（分钟） |
 
 前端 `web/.env`（节选）：
 
@@ -548,6 +559,14 @@ data/             # 本地数据库/导出文件/缓存（默认不提交）
 | `use_count` | `Integer` | 默认 `0` | 提交抓取任务次数 |
 | `last_used_at` | `DateTime(timezone=True)` | 可空 | 最近一次提交抓取任务时间 |
 | `last_sync_at` | `DateTime(timezone=True)` | 可空 | 最近一次抓取完成时间 |
+| `auto_sync_enabled` | `Boolean` | 默认 `false`、索引 | 是否开启自动同步 |
+| `auto_sync_interval_minutes` | `Integer` | 默认 `1440` | 自动同步频率（分钟） |
+| `auto_sync_lookback_days` | `Integer` | 默认 `3` | 自动同步回看窗口（天） |
+| `auto_sync_overlap_hours` | `Integer` | 默认 `6` | 与上次成功同步的重叠窗口（小时） |
+| `auto_sync_next_run_at` | `DateTime(timezone=True)` | 可空、索引 | 下次计划执行时间 |
+| `auto_sync_last_success_at` | `DateTime(timezone=True)` | 可空 | 最近一次自动同步成功时间 |
+| `auto_sync_last_error` | `Text` | 可空 | 最近一次自动同步错误 |
+| `auto_sync_consecutive_failures` | `Integer` | 默认 `0` | 自动同步连续失败次数 |
 | `created_at` | `DateTime(timezone=True)` | 非空 | 创建时间（UTC） |
 | `updated_at` | `DateTime(timezone=True)` | 非空 | 更新时间（UTC） |
 
@@ -556,6 +575,7 @@ data/             # 本地数据库/导出文件/缓存（默认不提交）
 - 新建/更新入口：`POST /api/v1/mps`
 - 列表查询入口：`GET /api/v1/mps`（支持 `favorite_only=true`）
 - 设为常用入口：`PATCH /api/v1/mps/{mp_id}/favorite`
+- 自动同步配置：`PATCH /api/v1/mps/{mp_id}/auto-sync`
 - 提交抓取任务入口：`POST /api/v1/mps/{mp_id}/sync/jobs`
 
 ### `articles`（文章表）
@@ -578,6 +598,7 @@ data/             # 本地数据库/导出文件/缓存（默认不提交）
 |---|---|---|
 | `id` | `String(64)` | 任务 ID（`job_xxx`） |
 | `mp_id` | `String(128)` | 目标公众号 ID |
+| `source` | `String(32)` | 任务来源：`manual/retry/scheduled` |
 | `status` | `String(32)` | `queued/running/canceling/success/failed/canceled` |
 | `start_ts/end_ts` | `BigInteger` | 抓取时间范围（秒级时间戳） |
 | `requested_count` | `Integer` | 历史字段（兼容保留，不再作为入参） |

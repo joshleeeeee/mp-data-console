@@ -1,12 +1,15 @@
 import json
+import random
 import threading
+import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import desc, or_
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.db import SessionLocal
 from app.models import CaptureJob, CaptureJobLog, MPAccount
 from app.services.article_service import article_service
@@ -21,11 +24,14 @@ class CaptureJobService:
     RANGE_CAPTURE_PAGE_LIMIT = 300
     TERMINAL_STATUSES = ("success", "failed", "canceled")
     CANCEL_MESSAGE = "用户取消任务"
+    JOB_SOURCES = ("manual", "scheduled", "retry")
+    DEFAULT_SOURCE = "manual"
 
     def __init__(self) -> None:
         self._worker_lock = threading.Lock()
         self._active_ids_lock = threading.Lock()
         self._active_job_ids: set[str] = set()
+        self._runtime_boot_at = utcnow()
 
     def _mark_job_active(self, job_id: str) -> None:
         with self._active_ids_lock:
@@ -38,6 +44,14 @@ class CaptureJobService:
     def _snapshot_active_job_ids(self) -> set[str]:
         with self._active_ids_lock:
             return set(self._active_job_ids)
+
+    @staticmethod
+    def _as_unix_ts(value: datetime | None) -> float | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc).timestamp()
+        return value.timestamp()
 
     def _reconcile_active_jobs(self, db: Session) -> None:
         runtime_active = self._snapshot_active_job_ids()
@@ -79,16 +93,52 @@ class CaptureJobService:
         for row in rows:
             if row.id in runtime_active:
                 continue
+
+            reference_time = row.started_at or row.created_at
+            reference_ts = self._as_unix_ts(reference_time)
+            runtime_boot_ts = self._as_unix_ts(self._runtime_boot_at)
+            interrupted_by_restart = bool(
+                reference_ts is not None
+                and runtime_boot_ts is not None
+                and reference_ts < runtime_boot_ts
+            )
+            if interrupted_by_restart:
+                reason = "任务在执行过程中遇到服务重启或热更新，线程已中断"
+                hint = "若使用开发模式（uvicorn --reload），修改后端代码会中断进行中的后台抓取任务"
+            else:
+                reason = "任务执行线程异常中断"
+                hint = "请查看服务端日志定位异常原因，建议重试该任务"
+
             row.status = "failed"
             if not row.error:
-                row.error = "任务进程已中断，请重新发起抓取"
+                row.error = f"{reason}，请重新发起抓取"
             if not row.finished_at:
                 row.finished_at = utcnow()
+
+            if row.source == "scheduled":
+                self._update_scheduled_mp_state(
+                    db,
+                    mp_id=row.mp_id,
+                    success=False,
+                    error=row.error,
+                )
+
             self._append_log(
                 db,
                 row.id,
                 level="error",
                 message="任务进程已中断，已自动标记失败",
+                payload={
+                    "reason": reason,
+                    "hint": hint,
+                    "runtime_boot_at": self._runtime_boot_at.isoformat(),
+                    "job_created_at": row.created_at.isoformat()
+                    if row.created_at
+                    else None,
+                    "job_started_at": row.started_at.isoformat()
+                    if row.started_at
+                    else None,
+                },
             )
             db.add(row)
             changed = True
@@ -159,6 +209,7 @@ class CaptureJobService:
             "mp_id": job.mp_id,
             "mp_nickname": job.mp_nickname,
             "status": job.status,
+            "source": job.source,
             "start_ts": job.start_ts,
             "end_ts": job.end_ts,
             "created": job.created_count,
@@ -183,6 +234,7 @@ class CaptureJobService:
         limit: int = 20,
         status: str = "",
         mp_id: str = "",
+        source: str = "",
         keyword: str = "",
     ) -> tuple[list[dict[str, Any]], int]:
         self._reconcile_active_jobs(db)
@@ -193,6 +245,9 @@ class CaptureJobService:
 
         if mp_id.strip():
             query = query.filter(CaptureJob.mp_id == mp_id.strip())
+
+        if source.strip():
+            query = query.filter(CaptureJob.source == source.strip())
 
         if keyword.strip():
             term = f"%{keyword.strip()}%"
@@ -261,6 +316,7 @@ class CaptureJobService:
         mp: MPAccount,
         start_ts: int | None = None,
         end_ts: int | None = None,
+        source: str = DEFAULT_SOURCE,
     ) -> dict[str, Any]:
         active_job = self.get_active_job(db)
         if active_job:
@@ -274,6 +330,10 @@ class CaptureJobService:
         if start_ts is None or end_ts is None:
             raise ValueError("必须指定抓取时间范围")
 
+        source_name = (source or self.DEFAULT_SOURCE).strip().lower()
+        if source_name not in self.JOB_SOURCES:
+            raise ValueError(f"不支持的任务来源：{source}")
+
         start = int(start_ts)
         end = int(end_ts)
         if start > end:
@@ -284,6 +344,7 @@ class CaptureJobService:
             mp_id=mp.id,
             mp_nickname=mp.nickname,
             status="queued",
+            source=source_name,
             pages_hint=self.RANGE_CAPTURE_PAGE_LIMIT,
             requested_count=0,
             start_ts=start,
@@ -296,6 +357,7 @@ class CaptureJobService:
             job.id,
             message="任务已创建，等待执行",
             payload={
+                "source": source_name,
                 "start_ts": start,
                 "end_ts": end,
                 "max_pages": self.RANGE_CAPTURE_PAGE_LIMIT,
@@ -385,7 +447,76 @@ class CaptureJobService:
             mp=mp,
             start_ts=int(source.start_ts),
             end_ts=int(source.end_ts),
+            source="retry",
         )
+
+    def _compute_auto_sync_next_run(
+        self, *, base_time: datetime, interval_minutes: int
+    ) -> datetime:
+        jitter_max_seconds = max(
+            0, int(settings.auto_sync_dispatch_jitter_seconds or 0)
+        )
+        jitter_seconds = (
+            random.randint(0, jitter_max_seconds) if jitter_max_seconds > 0 else 0
+        )
+        return article_service.compute_next_auto_sync_run(
+            base_time=base_time,
+            interval_minutes=interval_minutes,
+            jitter_seconds=jitter_seconds,
+        )
+
+    def _update_scheduled_mp_state(
+        self,
+        db: Session,
+        *,
+        mp_id: str,
+        success: bool,
+        error: str | None = None,
+    ) -> None:
+        mp = db.query(MPAccount).filter(MPAccount.id == mp_id).first()
+        if not mp or not bool(mp.auto_sync_enabled):
+            return
+
+        now = utcnow()
+        mp.auto_sync_interval_minutes = (
+            article_service.normalize_auto_sync_interval_minutes(
+                mp.auto_sync_interval_minutes
+            )
+        )
+        mp.auto_sync_lookback_days = article_service.normalize_auto_sync_lookback_days(
+            mp.auto_sync_lookback_days
+        )
+        mp.auto_sync_overlap_hours = article_service.normalize_auto_sync_overlap_hours(
+            mp.auto_sync_overlap_hours
+        )
+
+        if success:
+            mp.auto_sync_last_success_at = now
+            mp.auto_sync_last_error = None
+            mp.auto_sync_consecutive_failures = 0
+            mp.auto_sync_next_run_at = self._compute_auto_sync_next_run(
+                base_time=now,
+                interval_minutes=mp.auto_sync_interval_minutes,
+            )
+        else:
+            failures = max(0, int(mp.auto_sync_consecutive_failures or 0)) + 1
+            mp.auto_sync_consecutive_failures = failures
+            message = (error or "").strip() or "自动同步任务失败"
+            mp.auto_sync_last_error = message[:1000]
+
+            base_backoff = max(
+                1,
+                int(settings.auto_sync_failure_backoff_base_minutes or 15),
+            )
+            max_backoff = max(
+                base_backoff,
+                int(settings.auto_sync_failure_backoff_max_minutes or 360),
+            )
+            backoff_minutes = min(max_backoff, base_backoff * (2 ** (failures - 1)))
+            mp.auto_sync_next_run_at = now + timedelta(minutes=backoff_minutes)
+
+        mp.updated_at = now
+        db.add(mp)
 
     def _run_job(self, job_id: str) -> None:
         with self._worker_lock:
@@ -406,6 +537,13 @@ class CaptureJobService:
                         level="warn",
                         message="任务已取消，未进入执行阶段",
                     )
+                    if job.source == "scheduled":
+                        self._update_scheduled_mp_state(
+                            db,
+                            mp_id=job.mp_id,
+                            success=False,
+                            error=job.error,
+                        )
                     db.add(job)
                     db.commit()
                     return
@@ -514,6 +652,13 @@ class CaptureJobService:
                 ):
                     done_job.status = "canceled"
                     done_job.error = done_job.error or self.CANCEL_MESSAGE
+                    if done_job.source == "scheduled":
+                        self._update_scheduled_mp_state(
+                            db,
+                            mp_id=done_job.mp_id,
+                            success=False,
+                            error=done_job.error,
+                        )
                     self._append_log(
                         db,
                         done_job.id,
@@ -529,6 +674,12 @@ class CaptureJobService:
                 else:
                     done_job.status = "success"
                     done_job.error = None
+                    if done_job.source == "scheduled":
+                        self._update_scheduled_mp_state(
+                            db,
+                            mp_id=done_job.mp_id,
+                            success=True,
+                        )
                     self._append_log(
                         db,
                         done_job.id,
@@ -547,12 +698,29 @@ class CaptureJobService:
                 db.rollback()
                 failed_job = self._get_job_row(db, job_id)
                 if failed_job:
+                    error_type = exc.__class__.__name__
+                    error_text = str(exc).strip() or repr(exc)
+                    traceback_text = traceback.format_exc()
+                    if len(traceback_text) > 12000:
+                        traceback_text = (
+                            f"{traceback_text[:12000]}\n... <traceback truncated>"
+                        )
+
                     if failed_job.status in ("canceling", "canceled"):
                         failed_job.status = "canceled"
                         failed_job.error = failed_job.error or self.CANCEL_MESSAGE
                     else:
                         failed_job.status = "failed"
-                        failed_job.error = str(exc)
+                        failed_job.error = f"{error_type}: {error_text}"
+
+                    if failed_job.source == "scheduled":
+                        self._update_scheduled_mp_state(
+                            db,
+                            mp_id=failed_job.mp_id,
+                            success=False,
+                            error=failed_job.error,
+                        )
+
                     failed_job.finished_at = utcnow()
                     self._append_log(
                         db,
@@ -561,7 +729,11 @@ class CaptureJobService:
                         message="任务执行失败"
                         if failed_job.status == "failed"
                         else "任务已取消",
-                        payload={"error": str(exc)},
+                        payload={
+                            "error_type": error_type,
+                            "error": error_text,
+                            "traceback": traceback_text,
+                        },
                     )
                     db.add(failed_job)
                     db.commit()

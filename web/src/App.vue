@@ -38,6 +38,8 @@ const busy = reactive({
   captureJobDetail: false,
   captureJobLogs: false,
   favoriteMp: '',
+  autoSyncStatus: false,
+  autoSyncToggle: false,
   mps: false,
   articles: false,
   refreshArticle: '',
@@ -186,6 +188,7 @@ const captureJobsTotal = ref(0)
 const captureJobFilter = reactive({
   status: '',
   mp_id: '',
+  source: '',
   keyword: '',
   offset: 0,
   limit: 10,
@@ -205,6 +208,16 @@ const taskRowRefs = reactive({})
 const taskCenterFocusJobId = ref('')
 
 const mps = ref([])
+
+const autoSyncStatus = reactive({
+  service_enabled: false,
+  runner_alive: false,
+  tick_seconds: 0,
+  scheduled_mp_count: 0,
+  due_count: 0,
+  auth_status: 'unknown',
+  active_job: null,
+})
 
 const favoriteMps = computed(() => mps.value.filter((item) => Boolean(item.is_favorite)))
 
@@ -320,6 +333,12 @@ const captureJobStatusMeta = {
   canceled: { label: '已取消', tone: 'muted' },
 }
 
+const captureJobSourceMeta = {
+  manual: '手动',
+  scheduled: '自动',
+  retry: '重试',
+}
+
 const currentCaptureJobStatus = computed(() => {
   const status = captureJob.value?.status
   if (!status) {
@@ -348,6 +367,27 @@ const summaryCards = computed(() => [
   { label: '文章', value: overview.articles, icon: 'file-text' },
   { label: '状态', value: currentStatus.value.label, icon: 'shield' },
 ])
+
+const autoSyncRunnerStatus = computed(() => {
+  if (!autoSyncStatus.service_enabled) {
+    return { label: '已关闭', tone: 'muted' }
+  }
+  if (!autoSyncStatus.runner_alive) {
+    return { label: '未启动', tone: 'bad' }
+  }
+  if (autoSyncStatus.auth_status !== 'logged_in') {
+    return { label: '待登录', tone: 'warn' }
+  }
+  return { label: '运行中', tone: 'good' }
+})
+
+const autoSyncActiveJobText = computed(() => {
+  const activeJob = autoSyncStatus.active_job
+  if (!activeJob) {
+    return '当前无进行中的抓取任务'
+  }
+  return `当前任务 ${activeJob.id}（${captureJobSourceLabel(activeJob.source)}）`
+})
 
 const captureFormRange = computed(() => {
   return normalizeDateRange(captureForm.range_start, captureForm.range_end)
@@ -388,6 +428,11 @@ function captureTargetText(payload) {
 
 function captureJobStatusInfo(status) {
   return captureJobStatusMeta[status] || { label: status || '-', tone: 'muted' }
+}
+
+function captureJobSourceLabel(source) {
+  const key = String(source || 'manual').trim().toLowerCase()
+  return captureJobSourceMeta[key] || key || '未知'
 }
 
 function captureJobRangeLabel(payload) {
@@ -460,6 +505,20 @@ function formatCaptureJobLogPayload(payload) {
   } catch {
     return ''
   }
+}
+
+function captureJobFailureHint(job) {
+  const text = String(job?.error || '').trim()
+  if (!text) {
+    return ''
+  }
+
+  const interruptedKeywords = ['中断', '热更新', '重启']
+  if (interruptedKeywords.some((keyword) => text.includes(keyword))) {
+    return '常见原因：服务重启/热更新导致后台线程中断。建议重试任务，并避免抓取中重启后端（开发模式 --reload 会触发中断）。'
+  }
+
+  return ''
 }
 
 function syncCaptureJobRecord(job) {
@@ -545,6 +604,7 @@ async function focusTaskCenterActiveJob() {
       !activeJob &&
       !captureJobFilter.status &&
       !captureJobFilter.mp_id &&
+      !captureJobFilter.source &&
       !captureJobFilter.keyword.trim() &&
       captureJobFilter.offset > 0
     ) {
@@ -597,6 +657,11 @@ function captureJobMatchesCurrentFilter(job) {
 
   const mpId = String(captureJobFilter.mp_id || '').trim()
   if (mpId && job.mp_id !== mpId) {
+    return false
+  }
+
+  const source = String(captureJobFilter.source || '').trim()
+  if (source && String(job.source || 'manual') !== source) {
     return false
   }
 
@@ -747,6 +812,7 @@ const wechatImageHostPattern = /(?:qpic\.cn|qlogo\.cn|weixin\.qq\.com|wx\.qlogo\
 
 let pollTimer = null
 let captureJobPollTimer = null
+let autoSyncStatusTimer = null
 let noticeTimer = null
 let captureJobRefreshPending = false
 let taskCenterFocusTimer = null
@@ -1281,7 +1347,7 @@ async function applyCaptureJobUpdate(job, silent = false) {
     if (job.mp_id) {
       articleFilter.mp_id = job.mp_id
     }
-    await Promise.all([loadOverview(), loadMps(), loadArticles()])
+    await Promise.all([loadOverview(), loadMps(), loadAutoSyncStatus(true), loadArticles()])
 
     if (!silent && lastCaptureJobNoticeId !== job.id) {
       setNotice('success', '后台抓取完成，结果已更新')
@@ -1299,7 +1365,7 @@ async function applyCaptureJobUpdate(job, silent = false) {
     if (job.mp_id) {
       articleFilter.mp_id = job.mp_id
     }
-    await Promise.all([loadOverview(), loadMps(), loadArticles()])
+    await Promise.all([loadOverview(), loadMps(), loadAutoSyncStatus(true), loadArticles()])
   }
 
   if (job.status === 'failed' && !silent && lastCaptureJobNoticeId !== job.id) {
@@ -1349,6 +1415,9 @@ async function loadCaptureJobs(silent = false) {
     if (captureJobFilter.mp_id) {
       query.set('mp_id', captureJobFilter.mp_id)
     }
+    if (captureJobFilter.source) {
+      query.set('source', captureJobFilter.source)
+    }
     if (captureJobFilter.keyword.trim()) {
       query.set('keyword', captureJobFilter.keyword.trim())
     }
@@ -1358,7 +1427,10 @@ async function loadCaptureJobs(silent = false) {
     captureJobsTotal.value = Number(data?.total || 0)
 
     const usingDefaultFilter =
-      !captureJobFilter.status && !captureJobFilter.mp_id && !captureJobFilter.keyword.trim()
+      !captureJobFilter.status &&
+      !captureJobFilter.mp_id &&
+      !captureJobFilter.source &&
+      !captureJobFilter.keyword.trim()
     if (usingDefaultFilter) {
       const active = captureJobs.value.find(
         (item) =>
@@ -1400,6 +1472,7 @@ function applyCaptureJobFilters() {
 function resetCaptureJobFilters() {
   captureJobFilter.status = ''
   captureJobFilter.mp_id = ''
+  captureJobFilter.source = ''
   captureJobFilter.keyword = ''
   captureJobFilter.offset = 0
   loadCaptureJobs()
@@ -1639,7 +1712,7 @@ async function checkAuthStatus(silent = false) {
 
     if (session.status === 'logged_in') {
       stopPolling()
-      await Promise.all([loadOverview(), loadMps(), loadArticles(), loadCaptureJobs(true)])
+      await Promise.all([loadOverview(), loadMps(), loadAutoSyncStatus(true), loadArticles(), loadCaptureJobs(true)])
       if (!silent) {
         setNotice('success', '登录成功，准备就绪')
       }
@@ -1681,6 +1754,7 @@ async function logout() {
       account_avatar: null,
       last_error: null,
     })
+    await loadAutoSyncStatus(true)
     setNotice('info', '已注销登录会话')
   } catch (err) {
     setNotice('error', err.message || '注销失败')
@@ -1845,12 +1919,61 @@ async function toggleFavoriteMp(item) {
       const bt = b.last_used_at ? new Date(b.last_used_at).getTime() : 0
       return bt - at
     })
+    await loadAutoSyncStatus(true)
 
-    setNotice('success', nextFavorite ? '已设为常用公众号' : '已取消常用公众号')
+    setNotice(
+      'success',
+      nextFavorite ? '已设为常用公众号，自动同步会跟随常用状态开启' : '已取消常用公众号，自动同步会停止',
+    )
   } catch (err) {
     setNotice('error', err.message || '更新常用状态失败')
   } finally {
     busy.favoriteMp = ''
+  }
+}
+
+async function loadAutoSyncStatus(silent = false) {
+  busy.autoSyncStatus = !silent
+  try {
+    const data = await api('/ops/auto-sync/status')
+    autoSyncStatus.service_enabled = Boolean(data?.service_enabled)
+    autoSyncStatus.runner_alive = Boolean(data?.runner_alive)
+    autoSyncStatus.tick_seconds = Number(data?.tick_seconds || 0)
+    autoSyncStatus.scheduled_mp_count = Number(data?.scheduled_mp_count || 0)
+    autoSyncStatus.due_count = Number(data?.due_count || 0)
+    autoSyncStatus.auth_status = data?.auth_status || 'unknown'
+    autoSyncStatus.active_job = data?.active_job || null
+  } catch (err) {
+    if (!silent) {
+      setNotice('error', err.message || '读取自动同步状态失败')
+    }
+  } finally {
+    busy.autoSyncStatus = false
+  }
+}
+
+async function toggleAutoSyncServiceEnabled() {
+  busy.autoSyncToggle = true
+  try {
+    const targetEnabled = !Boolean(autoSyncStatus.service_enabled)
+    const data = await api('/ops/auto-sync/enabled', {
+      method: 'PATCH',
+      body: { enabled: targetEnabled },
+    })
+
+    autoSyncStatus.service_enabled = Boolean(data?.service_enabled)
+    autoSyncStatus.runner_alive = Boolean(data?.runner_alive)
+    autoSyncStatus.tick_seconds = Number(data?.tick_seconds || 0)
+    autoSyncStatus.scheduled_mp_count = Number(data?.scheduled_mp_count || 0)
+    autoSyncStatus.due_count = Number(data?.due_count || 0)
+    autoSyncStatus.auth_status = data?.auth_status || 'unknown'
+    autoSyncStatus.active_job = data?.active_job || null
+
+    setNotice('success', autoSyncStatus.service_enabled ? '自动同步调度已开启' : '自动同步调度已关闭')
+  } catch (err) {
+    setNotice('error', err.message || '切换自动同步调度失败')
+  } finally {
+    busy.autoSyncToggle = false
   }
 }
 
@@ -2448,6 +2571,7 @@ onMounted(async () => {
     loadSession(),
     loadOverview(),
     loadMps(),
+    loadAutoSyncStatus(true),
     loadArticles(),
     loadDbTables(),
     loadMcpConfig(),
@@ -2460,12 +2584,20 @@ onMounted(async () => {
     startPolling()
   }
 
+  autoSyncStatusTimer = setInterval(() => {
+    loadAutoSyncStatus(true)
+  }, 20000)
+
   busy.boot = false
 })
 
 onBeforeUnmount(() => {
   stopPolling()
   stopCaptureJobPolling()
+  if (autoSyncStatusTimer) {
+    clearInterval(autoSyncStatusTimer)
+    autoSyncStatusTimer = null
+  }
   if (noticeTimer) {
     clearTimeout(noticeTimer)
   }
@@ -2588,12 +2720,53 @@ onBeforeUnmount(() => {
             </header>
 
             <div class="saved-stack">
+              <div class="auto-sync-card">
+                <div class="auto-sync-card__head">
+                  <span class="capture-job__status" :class="`capture-job__status--${autoSyncRunnerStatus.tone}`">
+                    自动同步 {{ autoSyncRunnerStatus.label }}
+                  </span>
+                  <span class="auto-sync-card__meta">
+                    已开启 {{ autoSyncStatus.scheduled_mp_count }} · 待执行 {{ autoSyncStatus.due_count }}
+                  </span>
+                </div>
+                <p class="auto-sync-card__line">
+                  调度周期 {{ autoSyncStatus.tick_seconds || '-' }} 秒 · 登录
+                  {{ (statusMeta[autoSyncStatus.auth_status] || statusMeta.unknown).label }}
+                </p>
+                <p class="auto-sync-card__line">{{ autoSyncActiveJobText }}</p>
+                <div class="auto-sync-card__controls">
+                  <div class="auto-sync-card__switch-row">
+                    <span>自动同步常用公众号</span>
+                    <button
+                      type="button"
+                      class="ios-switch"
+                      :class="{ 'ios-switch--on': autoSyncStatus.service_enabled }"
+                      :aria-pressed="autoSyncStatus.service_enabled ? 'true' : 'false'"
+                      :aria-label="autoSyncStatus.service_enabled ? '关闭自动同步调度' : '开启自动同步调度'"
+                      :disabled="busy.autoSyncToggle"
+                      @click="toggleAutoSyncServiceEnabled"
+                    >
+                      <span class="ios-switch__thumb"></span>
+                    </button>
+                  </div>
+                  <span class="auto-sync-card__switch-hint">
+                    {{
+                      busy.autoSyncToggle
+                        ? '调度开关切换中...'
+                        : autoSyncStatus.service_enabled
+                          ? '已开启：系统会自动同步所有常用公众号'
+                          : '已关闭：不会触发自动同步'
+                    }}
+                  </span>
+                </div>
+              </div>
+
               <div class="capture-job" v-if="captureJob">
                 <div class="capture-job__head">
                   <span class="capture-job__status" :class="`capture-job__status--${currentCaptureJobStatus.tone}`">
                     {{ currentCaptureJobStatus.label }}
                   </span>
-                  <code>{{ captureJob.id }}</code>
+                  <code>{{ captureJob.id }} · {{ captureJobSourceLabel(captureJob.source) }}</code>
                 </div>
                 <p class="capture-job__meta">{{ captureJobProgressText }}</p>
                 <p class="capture-job__tip" v-if="hasActiveCaptureJob">
@@ -2680,7 +2853,10 @@ onBeforeUnmount(() => {
                         <span class="saved-mp-card__tag" v-if="item.is_favorite">常用</span>
                       </div>
                       <p>{{ item.alias ? `@${item.alias}` : item.fakeid }}</p>
-                      <p class="sub">抓取次数 {{ item.use_count || 0 }} · 最近提交 {{ formatDateTime(item.last_used_at) }}</p>
+                      <p class="sub">
+                        抓取次数 {{ item.use_count || 0 }} · 最近提交 {{ formatDateTime(item.last_used_at) }} ·
+                        自动同步 {{ item.is_favorite ? '开启' : '关闭' }}
+                      </p>
                       <div class="saved-mp-card__controls">
                         <span class="saved-mp-card__control-label">时间范围</span>
                         <div class="saved-mp-card__count-options">
@@ -3020,6 +3196,12 @@ onBeforeUnmount(() => {
                   {{ item.nickname || item.id }}
                 </option>
               </select>
+              <select v-model="captureJobFilter.source" @change="applyCaptureJobFilters">
+                <option value="">全部来源</option>
+                <option v-for="(label, key) in captureJobSourceMeta" :key="`capture-source-${key}`" :value="key">
+                  {{ label }}
+                </option>
+              </select>
               <input
                 v-model="captureJobFilter.keyword"
                 type="text"
@@ -3069,7 +3251,7 @@ onBeforeUnmount(() => {
                 </div>
                 <p class="task-row__line">
                   <strong>{{ job.mp_nickname || job.mp_id }}</strong>
-                  <span> · {{ captureJobRangeLabel(job) }}</span>
+                  <span> · {{ captureJobRangeLabel(job) }} · 来源 {{ captureJobSourceLabel(job.source) }}</span>
                 </p>
                 <p class="task-row__line">{{ captureJobMetricsLabel(job) }}</p>
                 <p class="task-row__line task-row__line--muted">
@@ -3515,6 +3697,10 @@ onBeforeUnmount(() => {
             <strong>{{ captureJobDetail.job.mp_nickname || captureJobDetail.job.mp_id }}</strong>
           </div>
           <div>
+            <span>任务来源</span>
+            <strong>{{ captureJobSourceLabel(captureJobDetail.job.source) }}</strong>
+          </div>
+          <div>
             <span>时间范围</span>
             <strong>{{ captureJobRangeLabel(captureJobDetail.job) }}</strong>
           </div>
@@ -3557,6 +3743,9 @@ onBeforeUnmount(() => {
         </div>
 
         <p class="task-detail__error" v-if="captureJobDetail.job?.error">{{ captureJobDetail.job.error }}</p>
+        <p class="task-detail__error-hint" v-if="captureJobFailureHint(captureJobDetail.job)">
+          {{ captureJobFailureHint(captureJobDetail.job) }}
+        </p>
 
         <section class="task-detail__logs">
           <div class="task-detail__logs-head">

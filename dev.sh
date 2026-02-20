@@ -15,6 +15,7 @@ FRONT_REQ_HASH_FILE="$RUN_DIR/frontend_dependencies.sha256"
 
 BACK_HOST="${BACK_HOST:-0.0.0.0}"
 BACK_PORT="${BACK_PORT:-18011}"
+BACK_RELOAD="${BACK_RELOAD:-true}"
 FRONT_HOST="${FRONT_HOST:-0.0.0.0}"
 FRONT_PORT="${FRONT_PORT:-5173}"
 
@@ -37,6 +38,9 @@ usage() {
   --install             强制重装后端/前端依赖
   --install-playwright  安装 Chromium（用于 PDF 导出）
   -h, --help            显示帮助
+
+环境变量:
+  BACK_RELOAD=true|false  是否开启后端热更新（默认 true）
 EOF
 }
 
@@ -276,9 +280,22 @@ start_backend() {
   fi
 
   info "启动后端服务..."
-  nohup "$VENV_DIR/bin/uvicorn" app.main:app \
-    --host "$BACK_HOST" --port "$BACK_PORT" --reload \
-    >"$BACK_LOG_FILE" 2>&1 &
+  local uvicorn_cmd=(
+    "$VENV_DIR/bin/uvicorn"
+    app.main:app
+    --host
+    "$BACK_HOST"
+    --port
+    "$BACK_PORT"
+  )
+
+  local reload_flag
+  reload_flag="$(printf '%s' "$BACK_RELOAD" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$reload_flag" == "1" || "$reload_flag" == "true" || "$reload_flag" == "yes" ]]; then
+    uvicorn_cmd+=(--reload)
+  fi
+
+  nohup "${uvicorn_cmd[@]}" >"$BACK_LOG_FILE" 2>&1 &
   echo "$!" >"$BACK_PID_FILE"
 }
 

@@ -62,15 +62,66 @@ def _apply_runtime_migrations() -> None:
                 "CREATE INDEX IF NOT EXISTS ix_mps_is_favorite ON mps (is_favorite)"
             )
 
+        if "auto_sync_enabled" not in mp_columns:
+            statements.append(
+                "ALTER TABLE mps ADD COLUMN auto_sync_enabled BOOLEAN DEFAULT 0"
+            )
+        if "auto_sync_interval_minutes" not in mp_columns:
+            statements.append(
+                "ALTER TABLE mps ADD COLUMN auto_sync_interval_minutes INTEGER DEFAULT 1440"
+            )
+        if "auto_sync_lookback_days" not in mp_columns:
+            statements.append(
+                "ALTER TABLE mps ADD COLUMN auto_sync_lookback_days INTEGER DEFAULT 3"
+            )
+        if "auto_sync_overlap_hours" not in mp_columns:
+            statements.append(
+                "ALTER TABLE mps ADD COLUMN auto_sync_overlap_hours INTEGER DEFAULT 6"
+            )
+        if "auto_sync_next_run_at" not in mp_columns:
+            statements.append(
+                "ALTER TABLE mps ADD COLUMN auto_sync_next_run_at DATETIME"
+            )
+        if "auto_sync_last_success_at" not in mp_columns:
+            statements.append(
+                "ALTER TABLE mps ADD COLUMN auto_sync_last_success_at DATETIME"
+            )
+        if "auto_sync_last_error" not in mp_columns:
+            statements.append("ALTER TABLE mps ADD COLUMN auto_sync_last_error TEXT")
+        if "auto_sync_consecutive_failures" not in mp_columns:
+            statements.append(
+                "ALTER TABLE mps ADD COLUMN auto_sync_consecutive_failures INTEGER DEFAULT 0"
+            )
+
+        if "ix_mps_auto_sync_enabled" not in mp_indexes:
+            statements.append(
+                "CREATE INDEX IF NOT EXISTS ix_mps_auto_sync_enabled ON mps (auto_sync_enabled)"
+            )
+        if "ix_mps_auto_sync_next_run_at" not in mp_indexes:
+            statements.append(
+                "CREATE INDEX IF NOT EXISTS ix_mps_auto_sync_next_run_at ON mps (auto_sync_next_run_at)"
+            )
+
     if "capture_jobs" in table_names:
         capture_job_columns = {
             col["name"] for col in inspector.get_columns("capture_jobs")
+        }
+        capture_job_indexes = {
+            idx["name"] for idx in inspector.get_indexes("capture_jobs")
         }
 
         if "start_ts" not in capture_job_columns:
             statements.append("ALTER TABLE capture_jobs ADD COLUMN start_ts BIGINT")
         if "end_ts" not in capture_job_columns:
             statements.append("ALTER TABLE capture_jobs ADD COLUMN end_ts BIGINT")
+        if "source" not in capture_job_columns:
+            statements.append(
+                "ALTER TABLE capture_jobs ADD COLUMN source VARCHAR(32) DEFAULT 'manual'"
+            )
+        if "ix_capture_jobs_source" not in capture_job_indexes:
+            statements.append(
+                "CREATE INDEX IF NOT EXISTS ix_capture_jobs_source ON capture_jobs (source)"
+            )
 
     if not statements:
         return

@@ -4,7 +4,7 @@ import json
 import re
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from bs4 import BeautifulSoup
@@ -21,6 +21,13 @@ def utcnow() -> datetime:
 
 
 class ArticleService:
+    AUTO_SYNC_MIN_INTERVAL_MINUTES = 30
+    AUTO_SYNC_MAX_INTERVAL_MINUTES = 10080
+    AUTO_SYNC_MIN_LOOKBACK_DAYS = 1
+    AUTO_SYNC_MAX_LOOKBACK_DAYS = 365
+    AUTO_SYNC_MIN_OVERLAP_HOURS = 0
+    AUTO_SYNC_MAX_OVERLAP_HOURS = 72
+
     def __init__(self, client: WeChatClient):
         self.client = client
 
@@ -89,6 +96,7 @@ class ArticleService:
         rows = (
             query.order_by(
                 desc(MPAccount.is_favorite),
+                desc(MPAccount.auto_sync_enabled),
                 desc(MPAccount.last_used_at),
                 desc(MPAccount.updated_at),
             )
@@ -97,6 +105,44 @@ class ArticleService:
             .all()
         )
         return rows, total
+
+    @classmethod
+    def normalize_auto_sync_interval_minutes(cls, value: int | None) -> int:
+        parsed = int(value or 0)
+        if parsed < cls.AUTO_SYNC_MIN_INTERVAL_MINUTES:
+            return cls.AUTO_SYNC_MIN_INTERVAL_MINUTES
+        if parsed > cls.AUTO_SYNC_MAX_INTERVAL_MINUTES:
+            return cls.AUTO_SYNC_MAX_INTERVAL_MINUTES
+        return parsed
+
+    @classmethod
+    def normalize_auto_sync_lookback_days(cls, value: int | None) -> int:
+        parsed = int(value or 0)
+        if parsed < cls.AUTO_SYNC_MIN_LOOKBACK_DAYS:
+            return cls.AUTO_SYNC_MIN_LOOKBACK_DAYS
+        if parsed > cls.AUTO_SYNC_MAX_LOOKBACK_DAYS:
+            return cls.AUTO_SYNC_MAX_LOOKBACK_DAYS
+        return parsed
+
+    @classmethod
+    def normalize_auto_sync_overlap_hours(cls, value: int | None) -> int:
+        parsed = int(value or 0)
+        if parsed < cls.AUTO_SYNC_MIN_OVERLAP_HOURS:
+            return cls.AUTO_SYNC_MIN_OVERLAP_HOURS
+        if parsed > cls.AUTO_SYNC_MAX_OVERLAP_HOURS:
+            return cls.AUTO_SYNC_MAX_OVERLAP_HOURS
+        return parsed
+
+    def compute_next_auto_sync_run(
+        self,
+        *,
+        base_time: datetime,
+        interval_minutes: int,
+        jitter_seconds: int = 0,
+    ) -> datetime:
+        safe_interval = self.normalize_auto_sync_interval_minutes(interval_minutes)
+        safe_jitter = max(0, int(jitter_seconds or 0))
+        return base_time + timedelta(minutes=safe_interval, seconds=safe_jitter)
 
     def get_mp(self, db: Session, mp_id: str) -> MPAccount | None:
         return db.query(MPAccount).filter(MPAccount.id == mp_id).first()
@@ -108,8 +154,99 @@ class ArticleService:
         if not mp:
             return None
 
+        now = utcnow()
         mp.is_favorite = bool(is_favorite)
-        mp.updated_at = utcnow()
+        mp.auto_sync_enabled = bool(is_favorite)
+        mp.auto_sync_interval_minutes = self.normalize_auto_sync_interval_minutes(
+            mp.auto_sync_interval_minutes
+        )
+        mp.auto_sync_lookback_days = self.normalize_auto_sync_lookback_days(
+            mp.auto_sync_lookback_days
+        )
+        mp.auto_sync_overlap_hours = self.normalize_auto_sync_overlap_hours(
+            mp.auto_sync_overlap_hours
+        )
+
+        if mp.is_favorite:
+            if mp.auto_sync_next_run_at is None or mp.auto_sync_next_run_at < now:
+                mp.auto_sync_next_run_at = now
+        else:
+            mp.auto_sync_next_run_at = None
+            mp.auto_sync_last_error = None
+            mp.auto_sync_consecutive_failures = 0
+
+        mp.updated_at = now
+        db.add(mp)
+        db.commit()
+        db.refresh(mp)
+        return mp
+
+    def update_mp_auto_sync(
+        self,
+        db: Session,
+        mp_id: str,
+        *,
+        enabled: bool | None = None,
+        interval_minutes: int | None = None,
+        lookback_days: int | None = None,
+        overlap_hours: int | None = None,
+        run_immediately: bool = False,
+    ) -> MPAccount | None:
+        mp = self.get_mp(db, mp_id)
+        if not mp:
+            return None
+
+        now = utcnow()
+
+        if enabled is not None:
+            mp.auto_sync_enabled = bool(enabled)
+
+        if interval_minutes is not None:
+            mp.auto_sync_interval_minutes = self.normalize_auto_sync_interval_minutes(
+                interval_minutes
+            )
+        else:
+            mp.auto_sync_interval_minutes = self.normalize_auto_sync_interval_minutes(
+                mp.auto_sync_interval_minutes
+            )
+
+        if lookback_days is not None:
+            mp.auto_sync_lookback_days = self.normalize_auto_sync_lookback_days(
+                lookback_days
+            )
+        else:
+            mp.auto_sync_lookback_days = self.normalize_auto_sync_lookback_days(
+                mp.auto_sync_lookback_days
+            )
+
+        if overlap_hours is not None:
+            mp.auto_sync_overlap_hours = self.normalize_auto_sync_overlap_hours(
+                overlap_hours
+            )
+        else:
+            mp.auto_sync_overlap_hours = self.normalize_auto_sync_overlap_hours(
+                mp.auto_sync_overlap_hours
+            )
+
+        if run_immediately and not mp.auto_sync_enabled:
+            mp.auto_sync_enabled = True
+
+        if mp.auto_sync_enabled:
+            if run_immediately:
+                mp.auto_sync_next_run_at = now
+            elif mp.auto_sync_next_run_at is None:
+                mp.auto_sync_next_run_at = self.compute_next_auto_sync_run(
+                    base_time=now,
+                    interval_minutes=mp.auto_sync_interval_minutes,
+                )
+            elif mp.auto_sync_next_run_at < now:
+                mp.auto_sync_next_run_at = now
+        else:
+            mp.auto_sync_next_run_at = None
+            mp.auto_sync_last_error = None
+            mp.auto_sync_consecutive_failures = 0
+
+        mp.updated_at = now
         db.add(mp)
         db.commit()
         db.refresh(mp)
