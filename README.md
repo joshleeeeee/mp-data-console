@@ -50,9 +50,9 @@
 ### 抓取链路
 
 - 扫码登录微信公众号后台（含状态轮询与会话恢复）
-- 公众号搜索与抓取前确认（头像、别名、目标条数）
+- 公众号搜索与抓取前确认（头像、别名、时间范围）
 - 后台抓取任务（`queued/running/success/failed`）
-- 去重计数：目标条数按“新增且不重复”文章计算
+- 时间范围抓取：只按 `date_start ~ date_end` 设定抓取窗口
 
 ### 内容与导出
 
@@ -129,12 +129,12 @@ flowchart LR
 - 公众号先搜索后入库，按 `fakeid`（必要时 `biz`）做 upsert，避免重复创建。
 - 抓取文章时优先使用 `appmsgpublish`，若返回空再回退 `appmsg`，提升兼容性。
 - 每页按 5 条扫描，任务内用 `url + aid` 双键去重，重复项计入 `duplicates_skipped`。
-- `target_count` 只按“新增文章数（created）”计数，已存在文章更新计入 `updated`，不占目标额度。
+- 按时间范围抓取：扫描会在触达时间窗口下界后自动停止。
 
 ### 3) 后台任务执行模型
 
 - 前端提交抓取后，后端先写入 `capture_jobs`（`queued`），再启动守护线程异步执行，不阻塞接口返回。
-- 运行中持续把 `created/updated/content_updated/scanned_pages/max_pages/reached_target` 回写数据库，前端可轮询得到实时进度。
+- 运行中持续把 `created/updated/content_updated/scanned_pages/max_pages` 回写数据库，前端可轮询得到实时进度。
 - 服务内用互斥锁保证同一时刻只跑一个抓取 worker，避免并发抓取导致登录态冲突与频控风险。
 - 若进程异常重启，数据库里遗留的 `queued/running` 任务会在下次查询时自动标记为 `failed`，并提示“任务进程已中断”。
 
@@ -275,9 +275,9 @@ npm run dev
 
 1. 获取二维码并扫码登录
 2. 搜索公众号并确认抓取目标
-3. 设置抓取条数（去重计数）与是否抓正文
+3. 设置抓取时间范围（开始日期 / 结束日期，或快捷范围）
 4. 提交抓取任务（任务进入后台执行，可离开当前页面）
-5. 回来查看任务状态（新增/更新/重复跳过/扫描页数）
+5. 回来查看任务状态（新增/更新/重复跳过/扫描进度）
 6. 在文章区预览正文并导出
 7. 在 MCP 客户端连接本地数据库，让 AI 执行检索、摘要与文本挖掘
 
@@ -459,7 +459,7 @@ codex mcp add mp-data-console --env PYTHONPATH="/abs/path/to/we-mp-mini" -- /abs
 ```bash
 curl -X POST "http://127.0.0.1:18011/api/v1/mps/<mp_id>/sync/jobs" \
   -H "Content-Type: application/json" \
-  -d '{"pages":4,"target_count":20,"fetch_content":true}'
+  -d '{"date_start":"2026-01-01","date_end":"2026-01-31"}'
 ```
 
 查询任务状态：
@@ -471,17 +471,18 @@ curl "http://127.0.0.1:18011/api/v1/mps/sync/jobs/<job_id>"
 返回中的关键字段：
 
 - `status`：`queued` / `running` / `success` / `failed`
+- `start_ts` / `end_ts`：任务使用的时间范围（秒级时间戳）
 - `created`：新增文章数
 - `updated`：已有文章更新数
 - `duplicates_skipped`：重复跳过数
-- `reached_target`：是否达到 `target_count`
+- `scanned_pages` / `max_pages`：后台扫描进度（内部分页）
 
-## 去重与任务语义
+## 时间范围抓取语义
 
-- `target_count` 表示目标新增文章数（去重后计数）
+- 抓取只接受时间范围（`date_start` + `date_end`），不再提供条数/页数入参
+- 后端会在内部自动分页，直到触达时间范围下界或达到安全扫描上限
 - 同一任务内若重复（按 `url/aid`），会跳过并计入 `duplicates_skipped`
-- 已存在文章会计入 `updated`，不会占用 `created` 目标条数
-- 若源数据不足，任务可完成但 `reached_target=false`
+- 已存在文章会计入 `updated`
 - 后台任务依赖后端进程存活；重启后端会中断进行中的任务
 
 ## 常用配置
@@ -574,11 +575,12 @@ data/             # 本地数据库/导出文件/缓存（默认不提交）
 | `id` | `String(64)` | 任务 ID（`job_xxx`） |
 | `mp_id` | `String(128)` | 目标公众号 ID |
 | `status` | `String(32)` | `queued/running/success/failed` |
-| `requested_count` | `Integer` | 目标去重新增条数 |
+| `start_ts/end_ts` | `BigInteger` | 抓取时间范围（秒级时间戳） |
+| `requested_count` | `Integer` | 历史字段（兼容保留，不再作为入参） |
 | `created_count/updated_count` | `Integer` | 新增/更新文章数 |
 | `duplicates_skipped` | `Integer` | 重复跳过数 |
-| `scanned_pages/max_pages` | `Integer` | 已扫页数/上限 |
-| `reached_target` | `Boolean` | 是否达成目标 |
+| `scanned_pages/max_pages` | `Integer` | 后台扫描进度（内部分页） |
+| `reached_target` | `Boolean` | 历史状态字段（兼容保留） |
 | `error` | `Text` | 失败原因 |
 | `created_at/started_at/finished_at` | `DateTime` | 任务时间线 |
 
@@ -600,9 +602,9 @@ data/             # 本地数据库/导出文件/缓存（默认不提交）
 
 可以。抓取任务提交后在服务端后台执行，回来后页面会继续展示任务状态。
 
-### 为什么设置了 20 条但没抓满？
+### 为什么选了时间范围但新增很少？
 
-常见原因是源数据不足、限频或重复较多。此时任务会完成，但 `reached_target` 可能为 `false`。
+常见原因是该时间段内可见文章本来就少、限频导致部分页重试失败，或大多数内容已在库中（计入 `updated` 而非 `created`）。
 
 ### 任务为什么会失败？
 
