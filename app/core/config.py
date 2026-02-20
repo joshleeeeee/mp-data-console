@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     playwright_headless: bool = True
     playwright_timeout_ms: int = 30000
 
+    auto_sync_enabled: bool = True
+    auto_sync_tick_seconds: int = 45
+    auto_sync_scan_limit: int = 10
+    auto_sync_dispatch_jitter_seconds: int = 180
+    auto_sync_failure_backoff_base_minutes: int = 15
+    auto_sync_failure_backoff_max_minutes: int = 360
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

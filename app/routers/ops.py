@@ -16,11 +16,13 @@ from app.core.db import get_db
 from app.models import Article, MPAccount
 from app.schemas import (
     ApiResponse,
+    AutoSyncEnabledUpdateRequest,
     DBRowCreateRequest,
     DBRowDeleteRequest,
     DBRowUpdateRequest,
     QuickSyncRequest,
 )
+from app.services.auto_sync_service import auto_sync_service
 from app.services.article_service import article_service
 from app.services.wechat_client import WeChatAuthError, wechat_client
 
@@ -85,6 +87,14 @@ COLUMN_COMMENTS: dict[str, dict[str, str]] = {
         "use_count": "提交抓取任务次数",
         "last_used_at": "最近一次提交抓取时间",
         "last_sync_at": "最近同步时间",
+        "auto_sync_enabled": "是否开启自动同步",
+        "auto_sync_interval_minutes": "自动同步频率（分钟）",
+        "auto_sync_lookback_days": "自动同步回看天数",
+        "auto_sync_overlap_hours": "自动同步重叠小时数",
+        "auto_sync_next_run_at": "自动同步下次执行时间",
+        "auto_sync_last_success_at": "自动同步最近成功时间",
+        "auto_sync_last_error": "自动同步最近错误",
+        "auto_sync_consecutive_failures": "自动同步连续失败次数",
     },
     "articles": {
         "id": "内部文章 ID",
@@ -103,6 +113,7 @@ COLUMN_COMMENTS: dict[str, dict[str, str]] = {
         "mp_id": "公众号 ID",
         "mp_nickname": "公众号名称快照",
         "status": "任务状态（queued/running/canceling/success/failed/canceled）",
+        "source": "任务来源（manual/scheduled/retry）",
         "pages_hint": "内部扫描页上限",
         "requested_count": "历史字段（已不作为抓取入参）",
         "start_ts": "时间范围起始（秒级时间戳）",
@@ -522,6 +533,11 @@ def _build_column_defs(table: Table) -> list[dict[str, Any]]:
 def get_overview(db: Session = Depends(get_db)):
     auth_state = wechat_client.get_auth_state(db)
     mp_count = db.query(MPAccount).count()
+    auto_sync_mp_count = (
+        db.query(MPAccount)
+        .filter(MPAccount.enabled.is_(True), MPAccount.auto_sync_enabled.is_(True))
+        .count()
+    )
     article_count = db.query(Article).count()
     latest_article = (
         db.query(Article)
@@ -534,6 +550,7 @@ def get_overview(db: Session = Depends(get_db)):
             "auth": auth_state,
             "counts": {
                 "mps": mp_count,
+                "auto_sync_mps": auto_sync_mp_count,
                 "articles": article_count,
             },
             "latest_article": {
@@ -546,6 +563,40 @@ def get_overview(db: Session = Depends(get_db)):
             else None,
         }
     )
+
+
+@router.get("/auto-sync/status", response_model=ApiResponse)
+def get_auto_sync_status(db: Session = Depends(get_db)):
+    return ApiResponse(data=auto_sync_service.get_status(db))
+
+
+@router.patch("/auto-sync/enabled", response_model=ApiResponse)
+def set_auto_sync_enabled(
+    payload: AutoSyncEnabledUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    auto_sync_service.set_enabled(payload.enabled)
+    if payload.enabled:
+        auto_sync_service.sync_favorite_targets(db, run_immediately=True)
+    return ApiResponse(data=auto_sync_service.get_status(db))
+
+
+@router.post("/auto-sync/run-now", response_model=ApiResponse)
+def run_auto_sync_now(
+    mp_id: str = Query("", description="指定单个公众号 ID"),
+    favorite_only: bool = Query(
+        True, description="仅对常用公众号生效（未指定 mp_id 时）"
+    ),
+    limit: int = Query(20, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    data = auto_sync_service.queue_due_now(
+        db,
+        mp_id=mp_id,
+        favorite_only=favorite_only,
+        limit=limit,
+    )
+    return ApiResponse(data=data)
 
 
 @router.post("/quick-sync", response_model=ApiResponse)

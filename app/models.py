@@ -51,6 +51,18 @@ class MPAccount(Base):
     last_sync_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    auto_sync_enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    auto_sync_interval_minutes: Mapped[int] = mapped_column(Integer, default=1440)
+    auto_sync_lookback_days: Mapped[int] = mapped_column(Integer, default=3)
+    auto_sync_overlap_hours: Mapped[int] = mapped_column(Integer, default=6)
+    auto_sync_next_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    auto_sync_last_success_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    auto_sync_last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    auto_sync_consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )
@@ -100,6 +112,7 @@ class CaptureJob(Base):
     mp_nickname: Mapped[str] = mapped_column(String(255))
 
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    source: Mapped[str] = mapped_column(String(32), default="manual", index=True)
     pages_hint: Mapped[int] = mapped_column(Integer, default=1)
     requested_count: Mapped[int] = mapped_column(Integer, default=20)
     start_ts: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.db import init_db
 from app.routers import articles, assets, auth, exports, mps, ops
+from app.services.auto_sync_service import auto_sync_service
 
 app = FastAPI(
     title=settings.app_name,
@@ -23,6 +24,12 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
+    auto_sync_service.start()
+
+
+@app.on_event("shutdown")
+def on_shutdown() -> None:
+    auto_sync_service.stop()
 
 
 @app.get("/")

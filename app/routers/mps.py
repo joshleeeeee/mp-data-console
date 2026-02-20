@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.db import get_db
 from app.schemas import (
     ApiResponse,
+    MPAutoSyncUpdateRequest,
     MPCreateRequest,
     MPFavoriteUpdateRequest,
     MPSyncRequest,
@@ -98,6 +99,26 @@ def set_mp_favorite(
     return ApiResponse(data=MPOut.model_validate(mp).model_dump())
 
 
+@router.patch("/{mp_id}/auto-sync", response_model=ApiResponse)
+def update_mp_auto_sync(
+    mp_id: str,
+    payload: MPAutoSyncUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    mp = article_service.update_mp_auto_sync(
+        db,
+        mp_id,
+        enabled=payload.enabled,
+        interval_minutes=payload.interval_minutes,
+        lookback_days=payload.lookback_days,
+        overlap_hours=payload.overlap_hours,
+        run_immediately=payload.run_immediately,
+    )
+    if not mp:
+        raise HTTPException(status_code=404, detail="公众号不存在")
+    return ApiResponse(data=MPOut.model_validate(mp).model_dump())
+
+
 @router.post("/{mp_id}/sync/jobs", response_model=ApiResponse)
 def create_sync_job(mp_id: str, payload: MPSyncRequest, db: Session = Depends(get_db)):
     mp = article_service.get_mp(db, mp_id)
@@ -130,6 +151,7 @@ def list_sync_jobs(
     limit: int = Query(20, ge=1, le=100),
     status: str = Query("", description="任务状态过滤"),
     mp_id: str = Query("", description="按公众号 ID 过滤"),
+    source: str = Query("", description="按任务来源过滤（manual/scheduled/retry）"),
     keyword: str = Query("", description="按任务 ID/公众号名/错误关键词过滤"),
     db: Session = Depends(get_db),
 ):
@@ -139,6 +161,7 @@ def list_sync_jobs(
         limit=limit,
         status=status,
         mp_id=mp_id,
+        source=source,
         keyword=keyword,
     )
     return ApiResponse(
@@ -148,6 +171,7 @@ def list_sync_jobs(
             "limit": limit,
             "status": status,
             "mp_id": mp_id,
+            "source": source,
             "keyword": keyword,
             "list": rows,
         }
