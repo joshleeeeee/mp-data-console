@@ -1,19 +1,41 @@
-# mp-data-console · 公众号数据控制台
+# mp-data-console · AI 可接入的公众号数据控制台
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Node](https://img.shields.io/badge/Node.js-20%2B-339933?logo=nodedotjs&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
 ![Vue](https://img.shields.io/badge/Vue-3.x-42B883?logo=vuedotjs&logoColor=white)
 
-一个面向个人/小团队的微信公众号数据工作台：扫码登录、搜索确认、后台抓取、正文预览、导出、数据库浏览、MCP 配置，一站式完成。
+一个面向个人/小团队的微信公众号文本数据底座：扫码登录、搜索确认、后台抓取、正文预览、导出、数据库浏览、MCP 接入一站式完成，让 AI 能直接消费公众号文本做数据挖掘与分析。
 
 ## 这个项目解决什么问题
 
-- 抓取流程繁琐：需要在登录、搜索、抓取、导出之间频繁切换。
-- 抓取体验焦虑：过去“抓取中”会卡住页面，用户不敢离开。
-- 数据可见性不足：抓了多少、重复多少、是否达到目标，不够透明。
+- AI 缺少可用数据源：公众号正文分散在微信后台，无法被大模型稳定访问。
+- 数据沉淀困难：抓取、清洗、去重、入库链路分散，难形成可复用的数据资产。
+- 分析流程割裂：抓取和 AI 工具脱节，无法快速完成检索、摘要、主题归纳与问答。
 
-这个项目的目标是把流程做成**低心智负担控制台**：任务提交到后台后可以离开页面，回来可继续查看状态与结果。
+这个项目的目标是把流程做成**AI 可消费的低心智负担控制台**：前端负责采集与可视化，后端负责入库与任务管理，MCP 负责把结构化文本安全地暴露给 AI 工具。
+
+## 核心价值（不仅是抓取）
+
+- 数据资产化：把公众号正文持续沉淀为可检索、可复用、可追溯的本地文本库。
+- AI 可直连：通过 MCP 直接把标题、正文与元数据暴露给大模型，不再手工复制粘贴。
+- 分析可落地：支持从“抓取数据”走到“摘要、分类、对比、趋势洞察”的完整闭环。
+- 协作可扩展：个人可自用，小团队可共享同一套数据口径与分析流程。
+
+## 适用人群
+
+- 内容团队：做选题雷达、爆款拆解、竞品账号跟踪。
+- 投研/咨询团队：沉淀行业观点，做主题归因与长期观察。
+- AI 应用开发者：把公众号文本作为 RAG/Agent 的稳定数据源。
+
+## 和传统方式相比
+
+| 维度 | 传统方式 | mp-data-console |
+|---|---|---|
+| 数据获取 | 手工登录 + 零散复制 | 后台任务批量抓取 + 去重入库 |
+| 数据形态 | 网页片段，难复用 | SQLite 全文 + 元数据，结构化沉淀 |
+| AI 接入 | 复制粘贴给模型，链路不稳定 | MCP 工具直连，查询与分析可复现 |
+| 产出效率 | 人工通读，耗时高 | AI 先筛选再深读，显著缩短分析周期 |
 
 ## 核心能力
 
@@ -38,6 +60,28 @@
 - MCP 文章文本服务配置一键生成（直连 SQLite）
 - 图片代理与导出图片本地化，降低防盗链导致的丢图
 
+### AI 接入与文本分析
+
+- 通过 MCP 直接读取公众号正文（标题 + 全文 + 元数据）
+- 支持在 Claude Desktop / Cursor / OpenCode / Codex 中即插即用
+- 提供 `search_articles` / `get_article_text` 等工具，便于 AI 检索与长文分析
+- 为分类、摘要、关键信息抽取、主题趋势分析提供统一文本数据入口
+
+## 典型分析场景（可直接交给 AI）
+
+1. 选题趋势监测：统计过去 30 天某垂类公众号高频主题、叙事角度与发布时间规律。
+2. 竞品内容对标：对比多个账号在同一时间窗口的选题重合度与表达差异。
+3. 长文快速提炼：对单篇或多篇文章抽取核心结论、关键事实与可执行建议。
+
+示例提示词：
+
+```text
+请基于最近 30 天抓取的「AI 行业」相关公众号文章，输出：
+1) 高频主题 Top 10
+2) 每个主题的代表文章与关键观点
+3) 下周可执行的 5 个选题建议
+```
+
 ## 架构概览
 
 ```mermaid
@@ -49,6 +93,18 @@ flowchart LR
   API --> EXP[Export Service]
   API --> IMG[Image Proxy]
   EXP --> OUT[data/exports]
+```
+
+### AI 数据流（从公众号到洞察）
+
+```mermaid
+flowchart LR
+  WX[微信公众号后台] --> C[抓取任务]
+  C --> D[(SQLite 正文库)]
+  D --> M[MCP Server]
+  M --> A[Claude/Cursor/OpenCode/Codex]
+  A --> I[摘要/分类/趋势分析]
+  I --> O[报告/导出/知识库]
 ```
 
 ## 实现原理（核心机制）
@@ -135,25 +191,33 @@ playwright install chromium
 ## 3 分钟上手（推荐）
 
 ```bash
-./scripts/dev-up.sh
+./dev.sh
 ```
 
-首次自动安装依赖：
+脚本会自动检测依赖是否需要安装（`requirements.txt` / `web/package-lock.json` 变化会自动重装）。
+
+强制重新安装依赖：
 
 ```bash
-./scripts/dev-up.sh --install
+./dev.sh up --install
 ```
 
-首次同时安装 PDF 导出依赖：
+安装 PDF 导出依赖（Chromium）：
 
 ```bash
-./scripts/dev-up.sh --install --install-playwright
+./dev.sh up --install-playwright
 ```
 
 停止服务：
 
 ```bash
-./scripts/dev-down.sh
+./dev.sh down
+```
+
+重启服务：
+
+```bash
+./dev.sh restart
 ```
 
 默认访问地址：
@@ -161,6 +225,22 @@ playwright install chromium
 - 前端：`http://127.0.0.1:5173`
 - 后端：`http://127.0.0.1:18011`
 - API 文档：`http://127.0.0.1:18011/docs`
+
+## 5 分钟拿到第一份 AI 分析结果
+
+1. 运行 `./dev.sh`，打开前端扫码登录并抓取 1~2 个公众号（建议先抓 20~50 篇，含正文）。
+2. 在「MCP 接入」页点击“刷新配置”，复制对应客户端配置（OpenCode / Codex / Claude / Cursor）。
+3. 在你的 AI 客户端加载 MCP 后，先调用 `list_mps` 和 `search_articles` 确认数据已可读。
+4. 发送分析指令（示例）：
+
+```text
+请对最近 30 天「新能源」相关公众号文章做分析：
+- 总结 5 个高频主题及其代表观点
+- 提取各主题的分歧点和共识点
+- 给出 3 条值得继续跟踪的信号
+```
+
+5. 如需交付结果，可在控制台导出 Markdown / HTML / PDF，或批量打包 ZIP。
 
 ## 手动启动（可选）
 
@@ -191,6 +271,7 @@ npm run dev
 4. 提交抓取任务（任务进入后台执行，可离开当前页面）
 5. 回来查看任务状态（新增/更新/重复跳过/扫描页数）
 6. 在文章区预览正文并导出
+7. 在 MCP 客户端连接本地数据库，让 AI 执行检索、摘要与文本挖掘
 
 ## API 快速索引（默认前缀：`/api/v1`）
 
@@ -232,9 +313,9 @@ npm run dev
 - `POST /ops/mcp/generate-file`
 - `GET /assets/image?url=<原图地址>`
 
-## MCP 访问 SQLite 正文
+## MCP 访问 SQLite 正文（AI 接入核心）
 
-项目内置了 MCP 服务模块 `app.mcp_server`，可直接读取 SQLite 中的文章正文文本（`articles.content_text`），便于在 Claude Desktop / Cursor 等 MCP 客户端里做问答、检索和摘要。
+项目内置了 MCP 服务模块 `app.mcp_server`，可直接读取 SQLite 中的文章正文文本（`articles.content_text`），便于在 Claude Desktop / Cursor / OpenCode / Codex 等 MCP 客户端里做问答、检索、摘要与主题分析。
 
 ### 1) 安装
 
@@ -252,19 +333,19 @@ python3 -m app.mcp_server --db-path "$(pwd)/data/wechat_mini.db"
 
 ### 3) 获取可直接粘贴的 MCP 配置
 
-方式 A：在前端「MCP 配置」页点击“刷新配置 / 生成配置文件”  
+方式 A：在前端「MCP 接入」页点击“刷新配置 / 生成配置文件”  
 方式 B：直接调用接口：
 
 ```bash
 curl "http://127.0.0.1:18011/api/v1/ops/mcp/config"
 ```
 
-返回中的 `config_json` 可直接用于客户端，例如：
+返回中的 `claude_config_json`（兼容字段 `config_json`）可直接用于 Claude / Cursor，例如：
 
 ```json
 {
   "mcpServers": {
-    "we-mp-mini-articles": {
+    "mp-data-console": {
       "command": "/abs/path/to/python",
       "args": [
         "-m",
@@ -276,6 +357,72 @@ curl "http://127.0.0.1:18011/api/v1/ops/mcp/config"
   }
 }
 ```
+
+OpenCode 请使用 `opencode_config_json`（`opencode.json` 配置片段），例如：
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "mp-data-console": {
+      "type": "local",
+      "enabled": true,
+      "command": [
+        "/abs/path/to/python",
+        "-m",
+        "app.mcp_server",
+        "--db-path",
+        "/abs/path/to/data/wechat_mini.db"
+      ],
+      "environment": {
+        "PYTHONPATH": "/abs/path/to/we-mp-mini"
+      }
+    }
+  }
+}
+```
+
+OpenCode 配置位置：
+
+- 项目级：项目根 `opencode.json`
+- 全局：`~/.config/opencode/opencode.json`
+
+保存后可执行：
+
+```bash
+opencode mcp list
+```
+
+Codex 请使用 `codex_config_toml`（`config.toml` 配置片段），例如：
+
+```toml
+[mcp_servers.mp-data-console]
+command = "/abs/path/to/python"
+args = ["-m", "app.mcp_server", "--db-path", "/abs/path/to/data/wechat_mini.db"]
+
+[mcp_servers.mp-data-console.env]
+PYTHONPATH = "/abs/path/to/we-mp-mini"
+```
+
+Codex 配置位置：
+
+- 全局：`~/.codex/config.toml`
+- 项目级：`.codex/config.toml`（仅 trusted 项目生效）
+
+也可以直接使用 `codex_cli_add_command`（CLI 一键添加命令），例如：
+
+```bash
+codex mcp add mp-data-console --env PYTHONPATH="/abs/path/to/we-mp-mini" -- /abs/path/to/python -m app.mcp_server --db-path "/abs/path/to/data/wechat_mini.db"
+```
+
+保存后可在 Codex TUI 输入 `/mcp` 查看是否加载，或继续用 `codex mcp` 管理 MCP。
+
+官方文档：
+
+- Claude Code MCP: https://code.claude.com/docs/en/mcp
+- Codex MCP: https://developers.openai.com/codex/mcp/
+- Config: https://opencode.ai/docs/config/
+- MCP Servers: https://opencode.ai/docs/mcp-servers/
 
 ### 4) MCP 工具（读取正文）
 
@@ -361,12 +508,10 @@ app/
   schemas.py      # Pydantic 模型
   mcp_server.py   # MCP 服务（读取 SQLite 文章正文）
   main.py         # FastAPI 入口
+dev.sh            # 前后端启停一体脚本（up/down/restart，自动依赖检测）
 web/
   src/            # Vue 页面与 API 调用
   vite.config.js  # 开发代理配置
-scripts/
-  dev-up.sh       # 一键启动前后端
-  dev-down.sh     # 停止前后端
 data/             # 本地数据库/导出文件/缓存（默认不提交）
 ```
 
