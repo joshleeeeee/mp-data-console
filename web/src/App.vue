@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import AppIcon from './components/AppIcon.vue'
 import { api, resolveApiUrl } from './lib/api'
 
@@ -201,6 +201,9 @@ const captureJobDetail = reactive({
   logLimit: 200,
 })
 
+const taskRowRefs = reactive({})
+const taskCenterFocusJobId = ref('')
+
 const mps = ref([])
 
 const favoriteMps = computed(() => mps.value.filter((item) => Boolean(item.is_favorite)))
@@ -299,6 +302,7 @@ const statusMeta = {
 
 const viewMeta = {
   capture: { label: '抓取', desc: '登录并抓取文章', icon: 'sparkles' },
+  tasks: { label: '任务中心', desc: '查看历史任务、日志与控制操作', icon: 'pulse' },
   mcp: { label: 'MCP 接入', desc: '接入 Claude / Cursor / OpenCode / Codex', icon: 'plug' },
   database: { label: '数据库', desc: '网页查看表和数据', icon: 'database' },
 }
@@ -310,6 +314,7 @@ const canCapture = computed(() => session.status === 'logged_in')
 const captureJobStatusMeta = {
   queued: { label: '排队中', tone: 'warn' },
   running: { label: '抓取中', tone: 'warn' },
+  canceling: { label: '取消中', tone: 'warn' },
   success: { label: '已完成', tone: 'good' },
   failed: { label: '失败', tone: 'bad' },
   canceled: { label: '已取消', tone: 'muted' },
@@ -325,7 +330,7 @@ const currentCaptureJobStatus = computed(() => {
 
 const hasActiveCaptureJob = computed(() => {
   const status = captureJob.value?.status
-  return status === 'queued' || status === 'running'
+  return status === 'queued' || status === 'running' || status === 'canceling'
 })
 
 const tokenPreview = computed(() => {
@@ -477,6 +482,107 @@ function syncCaptureJobRecord(job) {
   }
 
   captureJobs.value = [job, ...captureJobs.value].slice(0, captureJobFilter.limit)
+}
+
+function setTaskRowRef(jobId, el) {
+  if (!jobId) {
+    return
+  }
+  if (el) {
+    taskRowRefs[jobId] = el
+  } else {
+    delete taskRowRefs[jobId]
+  }
+}
+
+function clearTaskCenterFocus() {
+  taskCenterFocusJobId.value = ''
+  if (taskCenterFocusTimer) {
+    clearTimeout(taskCenterFocusTimer)
+    taskCenterFocusTimer = null
+  }
+}
+
+function markTaskCenterFocus(jobId) {
+  if (!jobId) {
+    return
+  }
+
+  taskCenterFocusJobId.value = jobId
+  if (taskCenterFocusTimer) {
+    clearTimeout(taskCenterFocusTimer)
+  }
+  taskCenterFocusTimer = setTimeout(() => {
+    if (taskCenterFocusJobId.value === jobId) {
+      taskCenterFocusJobId.value = ''
+    }
+  }, 2400)
+}
+
+function pickTaskCenterActiveJob() {
+  return (
+    captureJobs.value.find((item) => item.status === 'running') ||
+    captureJobs.value.find((item) => item.status === 'canceling') ||
+    captureJobs.value.find((item) => item.status === 'queued') ||
+    null
+  )
+}
+
+async function focusTaskCenterActiveJob() {
+  if (activeView.value !== 'tasks' || taskCenterFocusPending) {
+    return
+  }
+
+  taskCenterFocusPending = true
+  try {
+    if (!captureJobs.value.length && !busy.captureJobs) {
+      await loadCaptureJobs(true)
+    }
+
+    let activeJob = pickTaskCenterActiveJob()
+
+    if (
+      !activeJob &&
+      !captureJobFilter.status &&
+      !captureJobFilter.mp_id &&
+      !captureJobFilter.keyword.trim() &&
+      captureJobFilter.offset > 0
+    ) {
+      captureJobFilter.offset = 0
+      await loadCaptureJobs(true)
+      activeJob = pickTaskCenterActiveJob()
+    }
+
+    if (
+      !activeJob &&
+      captureJob.value &&
+      (captureJob.value.status === 'running' ||
+        captureJob.value.status === 'canceling' ||
+        captureJob.value.status === 'queued')
+    ) {
+      activeJob = captureJobs.value.find((item) => item.id === captureJob.value.id) || null
+    }
+
+    if (!activeJob?.id) {
+      clearTaskCenterFocus()
+      return
+    }
+
+    await nextTick()
+    const target = taskRowRefs[activeJob.id]
+    if (!target) {
+      return
+    }
+
+    markTaskCenterFocus(activeJob.id)
+    target.scrollIntoView({
+      behavior: 'smooth',
+      block: 'center',
+      inline: 'nearest',
+    })
+  } finally {
+    taskCenterFocusPending = false
+  }
 }
 
 function captureJobMatchesCurrentFilter(job) {
@@ -643,6 +749,8 @@ let pollTimer = null
 let captureJobPollTimer = null
 let noticeTimer = null
 let captureJobRefreshPending = false
+let taskCenterFocusTimer = null
+let taskCenterFocusPending = false
 let lastCaptureJobNoticeId = ''
 
 function setNotice(type, text, timeout = 3600) {
@@ -1157,7 +1265,7 @@ async function applyCaptureJobUpdate(job, silent = false) {
     return
   }
 
-  if (job.status === 'queued' || job.status === 'running') {
+  if (job.status === 'queued' || job.status === 'running' || job.status === 'canceling') {
     if (!captureJobPollTimer) {
       captureJobPollTimer = setInterval(() => {
         refreshCaptureJob(true)
@@ -1252,7 +1360,12 @@ async function loadCaptureJobs(silent = false) {
     const usingDefaultFilter =
       !captureJobFilter.status && !captureJobFilter.mp_id && !captureJobFilter.keyword.trim()
     if (usingDefaultFilter) {
-      const active = captureJobs.value.find((item) => item.status === 'queued' || item.status === 'running')
+      const active = captureJobs.value.find(
+        (item) =>
+          item.status === 'queued' ||
+          item.status === 'running' ||
+          item.status === 'canceling',
+      )
       if (active && captureJob.value?.id !== active.id) {
         await applyCaptureJobUpdate(active, true)
       } else if (!captureJob.value && captureJobs.value.length) {
@@ -1467,7 +1580,7 @@ async function loadLatestCaptureJob() {
       return
     }
     await applyCaptureJobUpdate(latest, true)
-    if (latest.status === 'queued' || latest.status === 'running') {
+    if (latest.status === 'queued' || latest.status === 'running' || latest.status === 'canceling') {
       await refreshCaptureJob(true)
     }
   } catch {
@@ -2312,6 +2425,20 @@ async function copyText(text, label = '内容') {
   }
 }
 
+watch(
+  () => activeView.value,
+  (nextView, prevView) => {
+    if (nextView === 'tasks' && prevView !== 'tasks') {
+      focusTaskCenterActiveJob()
+      return
+    }
+
+    if (prevView === 'tasks' && nextView !== 'tasks') {
+      clearTaskCenterFocus()
+    }
+  },
+)
+
 onMounted(async () => {
   busy.boot = true
   loadArticleLimitPreference()
@@ -2342,6 +2469,7 @@ onBeforeUnmount(() => {
   if (noticeTimer) {
     clearTimeout(noticeTimer)
   }
+  clearTaskCenterFocus()
 })
 </script>
 
@@ -2481,6 +2609,12 @@ onBeforeUnmount(() => {
                       <span>{{ busy.captureStatus ? '刷新中...' : '刷新任务状态' }}</span>
                     </span>
                   </button>
+                  <button class="btn" @click="activeView = 'tasks'">
+                    <span class="btn__inner">
+                      <AppIcon name="pulse" :size="15" />
+                      <span>任务中心</span>
+                    </span>
+                  </button>
                   <button class="btn" :disabled="!captureJob?.id" @click="openCaptureJobDetail(captureJob)">
                     <span class="btn__inner">
                       <AppIcon name="eye" :size="15" />
@@ -2589,138 +2723,6 @@ onBeforeUnmount(() => {
                 </div>
 
                 <p v-else class="empty">暂无已保存公众号，先搜索并提交一次抓取任务。</p>
-              </div>
-            </div>
-          </article>
-
-          <article class="panel">
-            <header class="panel__head">
-              <h3 class="title-row"><AppIcon name="database" :size="16" /> 任务中心</h3>
-              <div class="actions">
-                <button class="btn" :disabled="busy.captureJobs" @click="loadCaptureJobs(false)">
-                  <span class="btn__inner">
-                    <AppIcon name="refresh" :size="15" />
-                    <span>{{ busy.captureJobs ? '刷新中...' : '刷新列表' }}</span>
-                  </span>
-                </button>
-              </div>
-            </header>
-
-            <div class="task-center__filters">
-              <select v-model="captureJobFilter.status" @change="applyCaptureJobFilters">
-                <option value="">全部状态</option>
-                <option v-for="(meta, key) in captureJobStatusMeta" :key="`capture-status-${key}`" :value="key">
-                  {{ meta.label }}
-                </option>
-              </select>
-              <select v-model="captureJobFilter.mp_id" @change="applyCaptureJobFilters">
-                <option value="">全部公众号</option>
-                <option v-for="item in mps" :key="`capture-filter-mp-${item.id}`" :value="item.id">
-                  {{ item.nickname || item.id }}
-                </option>
-              </select>
-              <input
-                v-model="captureJobFilter.keyword"
-                type="text"
-                placeholder="任务ID/公众号/错误关键词"
-                @keyup.enter="applyCaptureJobFilters"
-              />
-              <select v-model.number="captureJobFilter.limit" @change="changeCaptureJobPageSize">
-                <option v-for="size in captureJobLimitOptions" :key="`capture-job-limit-${size}`" :value="size">
-                  每页 {{ size }} 条
-                </option>
-              </select>
-              <button class="btn" :disabled="busy.captureJobs" @click="applyCaptureJobFilters">
-                <span class="btn__inner">
-                  <AppIcon name="search" :size="14" />
-                  <span>筛选</span>
-                </span>
-              </button>
-              <button class="btn" :disabled="busy.captureJobs" @click="resetCaptureJobFilters">
-                <span class="btn__inner">
-                  <AppIcon name="x" :size="14" />
-                  <span>清空</span>
-                </span>
-              </button>
-            </div>
-
-            <div v-if="busy.captureJobs" class="task-center__loading">任务列表加载中...</div>
-
-            <div v-else-if="captureJobs.length" class="task-center__list">
-              <article class="task-row" v-for="job in captureJobs" :key="job.id">
-                <div class="task-row__head">
-                  <span class="capture-job__status" :class="`capture-job__status--${captureJobStatusInfo(job.status).tone}`">
-                    {{ captureJobStatusInfo(job.status).label }}
-                  </span>
-                  <code>{{ job.id }}</code>
-                </div>
-                <p class="task-row__line">
-                  <strong>{{ job.mp_nickname || job.mp_id }}</strong>
-                  <span> · {{ captureJobRangeLabel(job) }}</span>
-                </p>
-                <p class="task-row__line">{{ captureJobMetricsLabel(job) }}</p>
-                <p class="task-row__line task-row__line--muted">
-                  创建 {{ formatDateTime(job.created_at) }} · 结束 {{ formatDateTime(job.finished_at) }}
-                </p>
-                <p class="task-row__line task-row__line--error" v-if="job.error">{{ captureJobErrorSummary(job) }}</p>
-                <div class="task-row__actions">
-                  <button class="btn" :disabled="isCaptureJobActionBusy(job.id)" @click="openCaptureJobDetail(job)">
-                    <span class="btn__inner">
-                      <AppIcon name="eye" :size="14" />
-                      <span>详情</span>
-                    </span>
-                  </button>
-                  <button
-                    v-if="isCaptureJobCancelable(job)"
-                    class="btn btn--danger"
-                    :disabled="isCaptureJobActionBusy(job.id, 'cancel')"
-                    @click="cancelCaptureJob(job)"
-                  >
-                    <span class="btn__inner">
-                      <AppIcon name="pause" :size="14" />
-                      <span>{{ isCaptureJobActionBusy(job.id, 'cancel') ? '取消中...' : '取消' }}</span>
-                    </span>
-                  </button>
-                  <button
-                    v-if="isCaptureJobRetryable(job)"
-                    class="btn"
-                    :disabled="isCaptureJobActionBusy(job.id, 'retry')"
-                    @click="retryCaptureJob(job)"
-                  >
-                    <span class="btn__inner">
-                      <AppIcon name="rotate-cw" :size="14" />
-                      <span>{{ isCaptureJobActionBusy(job.id, 'retry') ? '重试中...' : '重试' }}</span>
-                    </span>
-                  </button>
-                </div>
-              </article>
-            </div>
-
-            <p v-else class="empty">暂无任务记录。</p>
-
-            <div class="task-center__pager">
-              <span>{{ captureJobRangeText }} · 第 {{ captureJobCurrentPage }} / {{ captureJobPageCount }} 页</span>
-              <div class="task-center__pager-actions">
-                <button
-                  class="btn"
-                  :disabled="busy.captureJobs || captureJobCurrentPage <= 1"
-                  @click="changeCaptureJobPage(-1)"
-                >
-                  <span class="btn__inner">
-                    <AppIcon name="arrow-left" :size="14" />
-                    <span>上一页</span>
-                  </span>
-                </button>
-                <button
-                  class="btn"
-                  :disabled="busy.captureJobs || captureJobCurrentPage >= captureJobPageCount"
-                  @click="changeCaptureJobPage(1)"
-                >
-                  <span class="btn__inner">
-                    <span>下一页</span>
-                    <AppIcon name="arrow-right" :size="14" />
-                  </span>
-                </button>
               </div>
             </div>
           </article>
@@ -2987,6 +2989,154 @@ onBeforeUnmount(() => {
             <p class="empty article-total" v-if="articleTotal > 0">当前筛选 {{ articleRangeText }}（第 {{ articleCurrentPage }} / {{ articlePageCount }} 页）</p>
           </article>
           </div>
+        </section>
+      </template>
+
+      <template v-else-if="activeView === 'tasks'">
+        <section class="panel-grid panel-grid--single task-center-page">
+          <article class="panel panel--wide">
+            <header class="panel__head">
+              <h3 class="title-row"><AppIcon name="pulse" :size="16" /> 任务中心</h3>
+              <div class="actions">
+                <button class="btn" :disabled="busy.captureJobs" @click="loadCaptureJobs(false)">
+                  <span class="btn__inner">
+                    <AppIcon name="refresh" :size="15" />
+                    <span>{{ busy.captureJobs ? '刷新中...' : '刷新列表' }}</span>
+                  </span>
+                </button>
+              </div>
+            </header>
+
+            <div class="task-center__filters">
+              <select v-model="captureJobFilter.status" @change="applyCaptureJobFilters">
+                <option value="">全部状态</option>
+                <option v-for="(meta, key) in captureJobStatusMeta" :key="`capture-status-${key}`" :value="key">
+                  {{ meta.label }}
+                </option>
+              </select>
+              <select v-model="captureJobFilter.mp_id" @change="applyCaptureJobFilters">
+                <option value="">全部公众号</option>
+                <option v-for="item in mps" :key="`capture-filter-mp-${item.id}`" :value="item.id">
+                  {{ item.nickname || item.id }}
+                </option>
+              </select>
+              <input
+                v-model="captureJobFilter.keyword"
+                type="text"
+                placeholder="任务ID/公众号/错误关键词"
+                @keyup.enter="applyCaptureJobFilters"
+              />
+              <select v-model.number="captureJobFilter.limit" @change="changeCaptureJobPageSize">
+                <option v-for="size in captureJobLimitOptions" :key="`capture-job-limit-${size}`" :value="size">
+                  每页 {{ size }} 条
+                </option>
+              </select>
+              <button class="btn" :disabled="busy.captureJobs" @click="applyCaptureJobFilters">
+                <span class="btn__inner">
+                  <AppIcon name="search" :size="14" />
+                  <span>筛选</span>
+                </span>
+              </button>
+              <button class="btn" :disabled="busy.captureJobs" @click="resetCaptureJobFilters">
+                <span class="btn__inner">
+                  <AppIcon name="x" :size="14" />
+                  <span>清空</span>
+                </span>
+              </button>
+            </div>
+
+            <div v-if="busy.captureJobs" class="task-center__loading">任务列表加载中...</div>
+
+            <div v-else-if="captureJobs.length" class="task-center__list">
+              <article
+                class="task-row"
+                :class="{
+                  'task-row--active':
+                    job.status === 'running' ||
+                    job.status === 'canceling' ||
+                    job.status === 'queued',
+                  'task-row--focus': taskCenterFocusJobId === job.id,
+                }"
+                v-for="job in captureJobs"
+                :key="job.id"
+                :ref="(el) => setTaskRowRef(job.id, el)"
+              >
+                <div class="task-row__head">
+                  <span class="capture-job__status" :class="`capture-job__status--${captureJobStatusInfo(job.status).tone}`">
+                    {{ captureJobStatusInfo(job.status).label }}
+                  </span>
+                  <code>{{ job.id }}</code>
+                </div>
+                <p class="task-row__line">
+                  <strong>{{ job.mp_nickname || job.mp_id }}</strong>
+                  <span> · {{ captureJobRangeLabel(job) }}</span>
+                </p>
+                <p class="task-row__line">{{ captureJobMetricsLabel(job) }}</p>
+                <p class="task-row__line task-row__line--muted">
+                  创建 {{ formatDateTime(job.created_at) }} · 结束 {{ formatDateTime(job.finished_at) }}
+                </p>
+                <p class="task-row__line task-row__line--error" v-if="job.error">{{ captureJobErrorSummary(job) }}</p>
+                <div class="task-row__actions">
+                  <button class="btn" :disabled="isCaptureJobActionBusy(job.id)" @click="openCaptureJobDetail(job)">
+                    <span class="btn__inner">
+                      <AppIcon name="eye" :size="14" />
+                      <span>详情</span>
+                    </span>
+                  </button>
+                  <button
+                    v-if="isCaptureJobCancelable(job)"
+                    class="btn btn--danger"
+                    :disabled="isCaptureJobActionBusy(job.id, 'cancel')"
+                    @click="cancelCaptureJob(job)"
+                  >
+                    <span class="btn__inner">
+                      <AppIcon name="pause" :size="14" />
+                      <span>{{ isCaptureJobActionBusy(job.id, 'cancel') ? '取消中...' : '取消' }}</span>
+                    </span>
+                  </button>
+                  <button
+                    v-if="isCaptureJobRetryable(job)"
+                    class="btn"
+                    :disabled="isCaptureJobActionBusy(job.id, 'retry')"
+                    @click="retryCaptureJob(job)"
+                  >
+                    <span class="btn__inner">
+                      <AppIcon name="rotate-cw" :size="14" />
+                      <span>{{ isCaptureJobActionBusy(job.id, 'retry') ? '重试中...' : '重试' }}</span>
+                    </span>
+                  </button>
+                </div>
+              </article>
+            </div>
+
+            <p v-else class="empty">暂无任务记录。</p>
+
+            <div class="task-center__pager">
+              <span>{{ captureJobRangeText }} · 第 {{ captureJobCurrentPage }} / {{ captureJobPageCount }} 页</span>
+              <div class="task-center__pager-actions">
+                <button
+                  class="btn"
+                  :disabled="busy.captureJobs || captureJobCurrentPage <= 1"
+                  @click="changeCaptureJobPage(-1)"
+                >
+                  <span class="btn__inner">
+                    <AppIcon name="arrow-left" :size="14" />
+                    <span>上一页</span>
+                  </span>
+                </button>
+                <button
+                  class="btn"
+                  :disabled="busy.captureJobs || captureJobCurrentPage >= captureJobPageCount"
+                  @click="changeCaptureJobPage(1)"
+                >
+                  <span class="btn__inner">
+                    <span>下一页</span>
+                    <AppIcon name="arrow-right" :size="14" />
+                  </span>
+                </button>
+              </div>
+            </div>
+          </article>
         </section>
       </template>
 
