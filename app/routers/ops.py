@@ -1,4 +1,5 @@
 import json
+import shlex
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -17,8 +18,13 @@ from app.services.wechat_client import WeChatAuthError, wechat_client
 
 router = APIRouter(prefix="/ops", tags=["ops"])
 
-MCP_SERVER_NAME = "we-mp-mini-articles"
+MCP_SERVER_NAME = "mp-data-console"
 MCP_SERVER_MODULE = "app.mcp_server"
+CLAUDE_CODE_MCP_DOCS_URL = "https://code.claude.com/docs/en/mcp"
+CODEX_MCP_DOCS_URL = "https://developers.openai.com/codex/mcp/"
+OPENCODE_CONFIG_SCHEMA_URL = "https://opencode.ai/config.json"
+OPENCODE_CONFIG_DOCS_URL = "https://opencode.ai/docs/config/"
+OPENCODE_MCP_DOCS_URL = "https://opencode.ai/docs/mcp-servers/"
 MCP_TOOL_DOCS = [
     {
         "name": "list_mps",
@@ -126,6 +132,10 @@ def _resolve_sqlite_path() -> str:
     return str(path)
 
 
+def _resolve_project_root() -> str:
+    return str(Path(__file__).resolve().parents[2])
+
+
 def _resolve_python_command() -> str:
     executable = sys.executable.strip() if sys.executable else ""
     return executable or "python3"
@@ -139,8 +149,110 @@ def _build_mcp_install_steps(python_command: str, database_path: str) -> list[st
             "本地验证 MCP 服务可启动："
             f'{python_command} -m {MCP_SERVER_MODULE} --db-path "{database_path}"'
         ),
-        "将下方 MCP 配置粘贴到你的 MCP 客户端（如 Claude Desktop / Cursor）",
+        "将下方 Claude/Cursor MCP 配置粘贴到客户端",
+        "如需更多说明，可参考 Claude Code MCP 官方文档",
     ]
+
+
+def _build_opencode_install_steps(server_name: str) -> list[str]:
+    return [
+        "将下方 OpenCode 配置片段复制到 opencode.json（项目根）或 ~/.config/opencode/opencode.json（全局）",
+        f"若已有 mcp 配置，请仅新增/合并 {server_name} 这一项，避免覆盖其他设置",
+        "保存后重启 OpenCode，执行命令 opencode mcp list 确认已加载",
+        "更多配置字段可参考 OpenCode 官方文档中的 Config 与 MCP Servers 章节",
+    ]
+
+
+def _build_codex_install_steps(server_name: str) -> list[str]:
+    return [
+        "将下方 Codex 配置片段复制到 ~/.codex/config.toml（全局）或 .codex/config.toml（trusted 项目）",
+        f"若已有 mcp_servers 配置，请仅新增/合并 {server_name} 区块，避免覆盖其他设置",
+        "保存后重启 Codex，可在 Codex TUI 中输入 /mcp 检查服务是否加载",
+        "也可通过 codex mcp 命令管理 MCP 服务",
+    ]
+
+
+def _build_codex_config_toml(
+    *,
+    server_name: str,
+    python_command: str,
+    launch_args: list[str],
+    project_root: str,
+) -> str:
+    command_literal = json.dumps(python_command, ensure_ascii=False)
+    args_literal = json.dumps(launch_args, ensure_ascii=False)
+    py_path_literal = json.dumps(project_root, ensure_ascii=False)
+
+    return "\n".join(
+        [
+            f"[mcp_servers.{server_name}]",
+            f"command = {command_literal}",
+            f"args = {args_literal}",
+            "",
+            f"[mcp_servers.{server_name}.env]",
+            f"PYTHONPATH = {py_path_literal}",
+        ]
+    )
+
+
+def _build_codex_cli_add_command(
+    *,
+    server_name: str,
+    python_command: str,
+    launch_args: list[str],
+    project_root: str,
+) -> str:
+    return shlex.join(
+        [
+            "codex",
+            "mcp",
+            "add",
+            server_name,
+            "--env",
+            f"PYTHONPATH={project_root}",
+            "--",
+            python_command,
+            *launch_args,
+        ]
+    )
+
+
+def _build_opencode_config(
+    *,
+    server_name: str,
+    python_command: str,
+    launch_args: list[str],
+    project_root: str,
+) -> dict[str, Any]:
+    return {
+        "$schema": OPENCODE_CONFIG_SCHEMA_URL,
+        "mcp": {
+            server_name: {
+                "type": "local",
+                "enabled": True,
+                "command": [python_command, *launch_args],
+                "environment": {
+                    "PYTHONPATH": project_root,
+                },
+            }
+        },
+    }
+
+
+def _build_claude_cursor_config(
+    *,
+    server_name: str,
+    python_command: str,
+    launch_args: list[str],
+) -> dict[str, Any]:
+    return {
+        "mcpServers": {
+            server_name: {
+                "command": python_command,
+                "args": launch_args,
+            }
+        }
+    }
 
 
 def _parse_search_columns(raw_columns: str, all_columns: list[str]) -> list[str]:
@@ -380,30 +492,67 @@ def get_mcp_config():
     database_path = _resolve_sqlite_path()
     server_name = MCP_SERVER_NAME
     python_command = _resolve_python_command()
-    args = ["-m", MCP_SERVER_MODULE, "--db-path", database_path]
+    launch_args = ["-m", MCP_SERVER_MODULE, "--db-path", database_path]
+    project_root = _resolve_project_root()
 
-    config = {
-        "mcpServers": {
-            server_name: {
-                "command": python_command,
-                "args": args,
-            }
-        }
-    }
+    claude_config = _build_claude_cursor_config(
+        server_name=server_name,
+        python_command=python_command,
+        launch_args=launch_args,
+    )
+    opencode_config = _build_opencode_config(
+        server_name=server_name,
+        python_command=python_command,
+        launch_args=launch_args,
+        project_root=project_root,
+    )
+    codex_config_toml = _build_codex_config_toml(
+        server_name=server_name,
+        python_command=python_command,
+        launch_args=launch_args,
+        project_root=project_root,
+    )
+    codex_cli_add_command = _build_codex_cli_add_command(
+        server_name=server_name,
+        python_command=python_command,
+        launch_args=launch_args,
+        project_root=project_root,
+    )
+    claude_install_steps = _build_mcp_install_steps(
+        python_command=python_command,
+        database_path=database_path,
+    )
+    opencode_install_steps = _build_opencode_install_steps(server_name=server_name)
+    codex_install_steps = _build_codex_install_steps(server_name=server_name)
 
     return ApiResponse(
         data={
             "server_name": server_name,
             "database_path": database_path,
+            "project_root": project_root,
             "python_command": python_command,
-            "launch_args": args,
+            "launch_args": launch_args,
             "tools": MCP_TOOL_DOCS,
-            "install_steps": _build_mcp_install_steps(
-                python_command=python_command,
-                database_path=database_path,
+            "install_steps": claude_install_steps,
+            "claude_install_steps": claude_install_steps,
+            "opencode_install_steps": opencode_install_steps,
+            "codex_install_steps": codex_install_steps,
+            "config": claude_config,
+            "claude_config": claude_config,
+            "opencode_config": opencode_config,
+            "config_json": json.dumps(claude_config, ensure_ascii=False, indent=2),
+            "claude_config_json": json.dumps(
+                claude_config, ensure_ascii=False, indent=2
             ),
-            "config": config,
-            "config_json": json.dumps(config, ensure_ascii=False, indent=2),
+            "opencode_config_json": json.dumps(
+                opencode_config, ensure_ascii=False, indent=2
+            ),
+            "codex_config_toml": codex_config_toml,
+            "codex_cli_add_command": codex_cli_add_command,
+            "claude_mcp_docs_url": CLAUDE_CODE_MCP_DOCS_URL,
+            "codex_mcp_docs_url": CODEX_MCP_DOCS_URL,
+            "opencode_docs_url": OPENCODE_CONFIG_DOCS_URL,
+            "opencode_mcp_docs_url": OPENCODE_MCP_DOCS_URL,
         }
     )
 
@@ -415,16 +564,39 @@ def generate_mcp_file():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     output_file = output_dir / "we-mp-mini.mcp.json"
-    output_file.write_text(data["config_json"], encoding="utf-8")
+    output_file.write_text(data["claude_config_json"], encoding="utf-8")
+    opencode_output_file = output_dir / "we-mp-mini.opencode.json"
+    opencode_output_file.write_text(data["opencode_config_json"], encoding="utf-8")
+    codex_output_file = output_dir / "we-mp-mini.codex.toml"
+    codex_output_file.write_text(data["codex_config_toml"], encoding="utf-8")
 
     return ApiResponse(
         data={
             "file_path": str(output_file.resolve()),
+            "opencode_file_path": str(opencode_output_file.resolve()),
+            "codex_file_path": str(codex_output_file.resolve()),
             "server_name": data["server_name"],
             "database_path": data["database_path"],
             "python_command": data.get("python_command", ""),
             "install_steps": data.get("install_steps", []),
+            "claude_install_steps": data.get("claude_install_steps", []),
+            "opencode_install_steps": data.get("opencode_install_steps", []),
+            "codex_install_steps": data.get("codex_install_steps", []),
             "tools": data.get("tools", []),
             "config_json": data["config_json"],
+            "claude_config_json": data["claude_config_json"],
+            "opencode_config_json": data["opencode_config_json"],
+            "codex_config_toml": data["codex_config_toml"],
+            "codex_cli_add_command": data.get("codex_cli_add_command", ""),
+            "claude_mcp_docs_url": data.get(
+                "claude_mcp_docs_url", CLAUDE_CODE_MCP_DOCS_URL
+            ),
+            "codex_mcp_docs_url": data.get("codex_mcp_docs_url", CODEX_MCP_DOCS_URL),
+            "opencode_docs_url": data.get(
+                "opencode_docs_url", OPENCODE_CONFIG_DOCS_URL
+            ),
+            "opencode_mcp_docs_url": data.get(
+                "opencode_mcp_docs_url", OPENCODE_MCP_DOCS_URL
+            ),
         }
     )
