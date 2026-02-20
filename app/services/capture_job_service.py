@@ -85,6 +85,8 @@ class CaptureJobService:
             "status": job.status,
             "pages_hint": job.pages_hint,
             "requested_count": job.requested_count,
+            "start_ts": job.start_ts,
+            "end_ts": job.end_ts,
             "fetch_content": job.fetch_content,
             "created": job.created_count,
             "updated": job.updated_count,
@@ -144,6 +146,8 @@ class CaptureJobService:
         pages: int,
         fetch_content: bool,
         target_count: int | None = None,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
     ) -> dict[str, Any]:
         active_job = self.get_active_job(db)
         if active_job:
@@ -152,8 +156,15 @@ class CaptureJobService:
             )
 
         pages_hint = max(1, int(pages))
+        has_date_range = start_ts is not None or end_ts is not None
         requested_count = (
-            max(1, int(target_count)) if target_count is not None else pages_hint * 5
+            0
+            if has_date_range
+            else (
+                max(1, int(target_count))
+                if target_count is not None
+                else pages_hint * 5
+            )
         )
 
         job = CaptureJob(
@@ -163,6 +174,8 @@ class CaptureJobService:
             status="queued",
             pages_hint=pages_hint,
             requested_count=requested_count,
+            start_ts=start_ts,
+            end_ts=end_ts,
             fetch_content=bool(fetch_content),
         )
         db.add(job)
@@ -230,6 +243,8 @@ class CaptureJobService:
                     pages=job.pages_hint,
                     fetch_content=job.fetch_content,
                     target_count=job.requested_count,
+                    start_ts=job.start_ts,
+                    end_ts=job.end_ts,
                     progress_callback=on_progress,
                 )
 

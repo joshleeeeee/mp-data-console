@@ -583,8 +583,9 @@ textarea:focus {
   font-size: 0.88rem;
 }
 
-.confirm-card__ops label input[type='number'] {
-  width: 84px;
+.confirm-card__ops label input[type='number'],
+.confirm-card__ops label input[type='date'] {
+  width: 140px;
 }
 
 .confirm-card__ops .capture-estimate {
@@ -601,6 +602,47 @@ textarea:focus {
 
 .confirm-card__ops .btn--primary {
   margin-left: auto;
+}
+
+.capture-custom-range-tools {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.capture-custom-range-list {
+  display: grid;
+  gap: 6px;
+}
+
+.capture-custom-range-item {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.capture-custom-range-item .saved-mp-card__count-btn {
+  padding: 3px 10px;
+}
+
+.capture-custom-range-remove {
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #64748b;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.73rem;
+  line-height: 1.45;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.capture-custom-range-remove:hover {
+  border-color: #fca5a5;
+  background: #fff1f2;
+  color: #be123c;
 }
 
 .confirm-card__tip {
@@ -699,6 +741,50 @@ textarea:focus {
   font-size: 0.78rem;
 }
 
+.saved-mp-card__controls {
+  margin-top: 7px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+}
+
+.saved-mp-card__control-label {
+  font-size: 0.75rem;
+  color: #475569;
+}
+
+.saved-mp-card__count-options {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.saved-mp-card__count-btn {
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #1e293b;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.74rem;
+  line-height: 1.45;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.saved-mp-card__count-btn:hover {
+  border-color: #7dd3fc;
+  background: #ecfeff;
+}
+
+.saved-mp-card__count-btn--active {
+  color: #0f172a;
+  border-color: #22d3ee;
+  background: #cffafe;
+}
+
 .saved-mp-card__tag {
   display: inline-flex;
   align-items: center;
@@ -715,6 +801,10 @@ textarea:focus {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.saved-mp-card__actions .btn--primary {
+  min-width: 138px;
 }
 
 .capture-job {
@@ -1496,6 +1586,10 @@ tbody td span {
     flex-wrap: wrap;
   }
 
+  .saved-mp-card__controls {
+    align-items: flex-start;
+  }
+
   .db-toolbar__row {
     grid-template-columns: 1fr;
   }
@@ -1535,6 +1629,14 @@ tbody td span {
   .actions select,
   .actions .btn {
     width: 100%;
+  }
+
+  .capture-custom-range-tools {
+    width: 100%;
+  }
+
+  .capture-custom-range-tools .btn {
+    flex: 1 1 calc(50% - 4px);
   }
 
   .db-editor-textarea {

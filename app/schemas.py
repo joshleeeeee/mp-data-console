@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ApiResponse(BaseModel):
@@ -37,6 +37,14 @@ class MPSyncRequest(BaseModel):
     pages: int = Field(default=1, ge=1, le=300)
     fetch_content: bool = True
     target_count: int | None = Field(default=None, ge=1, le=250)
+    date_start: date | None = None
+    date_end: date | None = None
+
+    @model_validator(mode="after")
+    def _validate_date_range(self):
+        if self.date_start and self.date_end and self.date_start > self.date_end:
+            raise ValueError("date_start 不能晚于 date_end")
+        return self
 
 
 class MPFavoriteUpdateRequest(BaseModel):

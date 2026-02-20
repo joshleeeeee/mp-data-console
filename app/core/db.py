@@ -43,23 +43,34 @@ def _apply_runtime_migrations() -> None:
 
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
-    if "mps" not in table_names:
-        return
-
-    existing_columns = {col["name"] for col in inspector.get_columns("mps")}
-    existing_indexes = {idx["name"] for idx in inspector.get_indexes("mps")}
     statements: list[str] = []
 
-    if "is_favorite" not in existing_columns:
-        statements.append("ALTER TABLE mps ADD COLUMN is_favorite BOOLEAN DEFAULT 0")
-    if "use_count" not in existing_columns:
-        statements.append("ALTER TABLE mps ADD COLUMN use_count INTEGER DEFAULT 0")
-    if "last_used_at" not in existing_columns:
-        statements.append("ALTER TABLE mps ADD COLUMN last_used_at DATETIME")
-    if "ix_mps_is_favorite" not in existing_indexes:
-        statements.append(
-            "CREATE INDEX IF NOT EXISTS ix_mps_is_favorite ON mps (is_favorite)"
-        )
+    if "mps" in table_names:
+        mp_columns = {col["name"] for col in inspector.get_columns("mps")}
+        mp_indexes = {idx["name"] for idx in inspector.get_indexes("mps")}
+
+        if "is_favorite" not in mp_columns:
+            statements.append(
+                "ALTER TABLE mps ADD COLUMN is_favorite BOOLEAN DEFAULT 0"
+            )
+        if "use_count" not in mp_columns:
+            statements.append("ALTER TABLE mps ADD COLUMN use_count INTEGER DEFAULT 0")
+        if "last_used_at" not in mp_columns:
+            statements.append("ALTER TABLE mps ADD COLUMN last_used_at DATETIME")
+        if "ix_mps_is_favorite" not in mp_indexes:
+            statements.append(
+                "CREATE INDEX IF NOT EXISTS ix_mps_is_favorite ON mps (is_favorite)"
+            )
+
+    if "capture_jobs" in table_names:
+        capture_job_columns = {
+            col["name"] for col in inspector.get_columns("capture_jobs")
+        }
+
+        if "start_ts" not in capture_job_columns:
+            statements.append("ALTER TABLE capture_jobs ADD COLUMN start_ts BIGINT")
+        if "end_ts" not in capture_job_columns:
+            statements.append("ALTER TABLE capture_jobs ADD COLUMN end_ts BIGINT")
 
     if not statements:
         return
