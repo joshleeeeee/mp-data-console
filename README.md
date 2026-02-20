@@ -51,8 +51,9 @@
 
 - 扫码登录微信公众号后台（含状态轮询与会话恢复）
 - 公众号搜索与抓取前确认（头像、别名、时间范围）
-- 后台抓取任务（`queued/running/success/failed`）
+- 后台抓取任务（`queued/running/success/failed/canceled`）
 - 时间范围抓取：只按 `date_start ~ date_end` 设定抓取窗口
+- 任务中心：任务历史、筛选、详情日志、取消与重试
 
 ### 内容与导出
 
@@ -300,6 +301,9 @@ npm run dev
 - `POST /mps/{mp_id}/sync/jobs`（后台任务，推荐）
 - `GET /mps/sync/jobs`
 - `GET /mps/sync/jobs/{job_id}`
+- `GET /mps/sync/jobs/{job_id}/logs`
+- `POST /mps/sync/jobs/{job_id}/cancel`
+- `POST /mps/sync/jobs/{job_id}/retry`
 - `POST /mps/{mp_id}/sync`（阻塞模式，兼容保留）
 
 ### 文章与导出
@@ -470,7 +474,7 @@ curl "http://127.0.0.1:18011/api/v1/mps/sync/jobs/<job_id>"
 
 返回中的关键字段：
 
-- `status`：`queued` / `running` / `success` / `failed`
+- `status`：`queued` / `running` / `success` / `failed` / `canceled`
 - `start_ts` / `end_ts`：任务使用的时间范围（秒级时间戳）
 - `created`：新增文章数
 - `updated`：已有文章更新数
@@ -574,7 +578,7 @@ data/             # 本地数据库/导出文件/缓存（默认不提交）
 |---|---|---|
 | `id` | `String(64)` | 任务 ID（`job_xxx`） |
 | `mp_id` | `String(128)` | 目标公众号 ID |
-| `status` | `String(32)` | `queued/running/success/failed` |
+| `status` | `String(32)` | `queued/running/success/failed/canceled` |
 | `start_ts/end_ts` | `BigInteger` | 抓取时间范围（秒级时间戳） |
 | `requested_count` | `Integer` | 历史字段（兼容保留，不再作为入参） |
 | `created_count/updated_count` | `Integer` | 新增/更新文章数 |
@@ -583,6 +587,17 @@ data/             # 本地数据库/导出文件/缓存（默认不提交）
 | `reached_target` | `Boolean` | 历史状态字段（兼容保留） |
 | `error` | `Text` | 失败原因 |
 | `created_at/started_at/finished_at` | `DateTime` | 任务时间线 |
+
+### `capture_job_logs`（任务日志表）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | `Integer` | 日志主键 |
+| `job_id` | `String(64)` | 关联抓取任务 ID |
+| `level` | `String(16)` | 日志级别（`info/warn/error`） |
+| `message` | `Text` | 日志内容 |
+| `payload_json` | `Text` | 结构化上下文（JSON） |
+| `created_at` | `DateTime` | 记录时间 |
 
 ### `auth_sessions`（登录会话表）
 

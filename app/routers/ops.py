@@ -62,6 +62,7 @@ TABLE_COMMENTS: dict[str, str] = {
     "mps": "已保存的公众号清单",
     "articles": "抓取到的文章正文与元数据",
     "capture_jobs": "后台抓取任务状态与结果",
+    "capture_job_logs": "抓取任务事件日志（进度/错误/取消）",
 }
 
 
@@ -101,7 +102,7 @@ COLUMN_COMMENTS: dict[str, dict[str, str]] = {
         "id": "抓取任务 ID",
         "mp_id": "公众号 ID",
         "mp_nickname": "公众号名称快照",
-        "status": "任务状态",
+        "status": "任务状态（queued/running/success/failed/canceled）",
         "pages_hint": "内部扫描页上限",
         "requested_count": "历史字段（已不作为抓取入参）",
         "start_ts": "时间范围起始（秒级时间戳）",
@@ -119,6 +120,14 @@ COLUMN_COMMENTS: dict[str, dict[str, str]] = {
         "started_at": "开始时间",
         "finished_at": "结束时间",
         "updated_at": "更新时间",
+    },
+    "capture_job_logs": {
+        "id": "日志主键",
+        "job_id": "关联任务 ID",
+        "level": "日志级别（info/warn/error）",
+        "message": "日志内容",
+        "payload_json": "结构化上下文 JSON",
+        "created_at": "记录时间",
     },
 }
 
