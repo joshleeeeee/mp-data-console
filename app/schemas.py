@@ -95,3 +95,16 @@ class QuickSyncRequest(BaseModel):
     pages: int = Field(default=1, ge=1, le=50)
     fetch_content: bool = True
     pick_index: int = Field(default=0, ge=0, le=20)
+
+
+class DBRowCreateRequest(BaseModel):
+    values: dict[str, Any] = Field(default_factory=dict)
+
+
+class DBRowUpdateRequest(BaseModel):
+    pk: dict[str, Any] = Field(default_factory=dict)
+    values: dict[str, Any] = Field(default_factory=dict)
+
+
+class DBRowDeleteRequest(BaseModel):
+    pk: dict[str, Any] = Field(default_factory=dict)

@@ -1,18 +1,26 @@
 import json
 import shlex
 import sys
-from datetime import datetime
+from datetime import date, datetime, time, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import MetaData, String, Table, and_, cast, func, inspect, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.db import get_db
 from app.models import Article, MPAccount
-from app.schemas import ApiResponse, QuickSyncRequest
+from app.schemas import (
+    ApiResponse,
+    DBRowCreateRequest,
+    DBRowDeleteRequest,
+    DBRowUpdateRequest,
+    QuickSyncRequest,
+)
 from app.services.article_service import article_service
 from app.services.wechat_client import WeChatAuthError, wechat_client
 
@@ -291,6 +299,214 @@ def _parse_exact_filters(raw_filters: str, all_columns: list[str]) -> dict[str, 
     return result
 
 
+def _load_table(db: Session, table_name: str) -> tuple[Table, list[str], list[str]]:
+    inspector = inspect(db.bind)
+    table_names = inspector.get_table_names()
+    if table_name not in table_names:
+        raise HTTPException(status_code=404, detail="表不存在")
+
+    metadata = MetaData()
+    table = Table(table_name, metadata, autoload_with=db.bind)
+    all_columns = [column.name for column in table.columns]
+    primary_keys = [column.name for column in table.primary_key.columns]
+    return table, all_columns, primary_keys
+
+
+def _column_python_type(column: Any) -> type[Any] | None:
+    try:
+        return column.type.python_type
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _column_has_default(column: Any) -> bool:
+    return column.default is not None or column.server_default is not None
+
+
+def _column_is_int(column: Any) -> bool:
+    return _column_python_type(column) is int
+
+
+def _column_is_autoincrement_pk(column: Any) -> bool:
+    autoincrement = getattr(column, "autoincrement", None)
+    return bool(
+        column.primary_key
+        and _column_is_int(column)
+        and autoincrement in (True, "auto")
+    )
+
+
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    raise ValueError("布尔值仅支持 true/false/1/0")
+
+
+def _coerce_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            raise ValueError("时间不能为空")
+        if raw.endswith("Z"):
+            raw = f"{raw[:-1]}+00:00"
+        return datetime.fromisoformat(raw)
+    raise ValueError("时间格式不正确，需为 ISO 字符串")
+
+
+def _coerce_date(value: Any) -> date:
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            raise ValueError("日期不能为空")
+        return date.fromisoformat(raw)
+    raise ValueError("日期格式不正确，需为 YYYY-MM-DD")
+
+
+def _coerce_time(value: Any) -> time:
+    if isinstance(value, time):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            raise ValueError("时间不能为空")
+        return time.fromisoformat(raw)
+    raise ValueError("时间格式不正确，需为 HH:MM:SS")
+
+
+def _coerce_column_value(column_name: str, column: Any, value: Any) -> Any:
+    if value is None:
+        return None
+
+    python_type = _column_python_type(column)
+    if python_type is None:
+        return value
+
+    try:
+        if python_type is bool:
+            return _coerce_bool(value)
+        if python_type is int:
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float):
+                if not value.is_integer():
+                    raise ValueError("整数不能包含小数")
+                return int(value)
+            return int(str(value).strip())
+        if python_type is float:
+            return float(value)
+        if python_type is Decimal:
+            return Decimal(str(value))
+        if python_type is datetime:
+            return _coerce_datetime(value)
+        if python_type is date:
+            return _coerce_date(value)
+        if python_type is time:
+            return _coerce_time(value)
+        if python_type in (dict, list):
+            if isinstance(value, str):
+                return json.loads(value)
+            return value
+        if python_type is str:
+            return str(value)
+        return value
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"字段 {column_name} 的值格式无效: {exc}") from exc
+
+
+def _normalize_row_values(table: Table, values: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(values, dict):
+        raise HTTPException(status_code=400, detail="values 必须是对象")
+
+    columns_by_name = {column.name: column for column in table.columns}
+    unknown = sorted(set(values) - set(columns_by_name))
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"字段不存在: {', '.join(unknown)}")
+
+    normalized: dict[str, Any] = {}
+    for name, value in values.items():
+        column = columns_by_name[name]
+        if value is None and not column.nullable:
+            raise HTTPException(status_code=400, detail=f"字段 {name} 不能为空")
+        try:
+            normalized[name] = _coerce_column_value(name, column, value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return normalized
+
+
+def _build_pk_where_clause(
+    table: Table,
+    pk_payload: dict[str, Any],
+) -> tuple[Any, dict[str, Any], list[str]]:
+    pk_columns = [column.name for column in table.primary_key.columns]
+    if not pk_columns:
+        raise HTTPException(status_code=400, detail="当前表没有主键，无法执行更新/删除")
+
+    if not isinstance(pk_payload, dict) or not pk_payload:
+        raise HTTPException(status_code=400, detail="pk 参数不能为空")
+
+    missing = [name for name in pk_columns if name not in pk_payload]
+    if missing:
+        raise HTTPException(
+            status_code=400, detail=f"缺少主键字段: {', '.join(missing)}"
+        )
+
+    extra = sorted(set(pk_payload) - set(pk_columns))
+    if extra:
+        raise HTTPException(status_code=400, detail=f"无效主键字段: {', '.join(extra)}")
+
+    pk_values = _normalize_row_values(
+        table, {name: pk_payload[name] for name in pk_columns}
+    )
+    clauses = [table.c[name] == pk_values[name] for name in pk_columns]
+    return and_(*clauses), pk_values, pk_columns
+
+
+def _read_row_by_pk(
+    db: Session,
+    table: Table,
+    pk_where_clause: Any,
+) -> dict[str, Any] | None:
+    row = db.execute(select(table).where(pk_where_clause)).mappings().first()
+    if not row:
+        return None
+    return {key: _serialize_value(value) for key, value in dict(row).items()}
+
+
+def _build_column_defs(table: Table) -> list[dict[str, Any]]:
+    definitions = []
+    for column in table.columns:
+        definitions.append(
+            {
+                "name": column.name,
+                "type": str(column.type),
+                "nullable": bool(column.nullable),
+                "primary_key": bool(column.primary_key),
+                "has_default": _column_has_default(column),
+                "autoincrement": _column_is_autoincrement_pk(column),
+            }
+        )
+    return definitions
+
+
 @router.get("/overview", response_model=ApiResponse)
 def get_overview(db: Session = Depends(get_db)):
     auth_state = wechat_client.get_auth_state(db)
@@ -419,15 +635,8 @@ def read_db_table(
     exact_filters: str = Query("", description="精确筛选，格式 col=val,col2=val2"),
     db: Session = Depends(get_db),
 ):
-    inspector = inspect(db.bind)
-    table_names = inspector.get_table_names()
-    if table_name not in table_names:
-        raise HTTPException(status_code=404, detail="表不存在")
-
     try:
-        metadata = MetaData()
-        table = Table(table_name, metadata, autoload_with=db.bind)
-        all_columns = [col.name for col in table.columns]
+        table, all_columns, primary_keys = _load_table(db, table_name)
 
         selected_search_columns = _parse_search_columns(search_columns, all_columns)
         selected_exact_filters = _parse_exact_filters(exact_filters, all_columns)
@@ -477,11 +686,169 @@ def read_db_table(
                 "keyword": keyword,
                 "search_columns": selected_search_columns,
                 "exact_filters": selected_exact_filters,
+                "primary_keys": primary_keys,
+                "column_defs": _build_column_defs(table),
                 "rows": serialized_rows,
             }
         )
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"读取表数据失败: {exc}") from exc
+
+
+@router.post("/db/table/{table_name}/row", response_model=ApiResponse)
+def create_db_row(
+    table_name: str,
+    payload: DBRowCreateRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        table, _, primary_keys = _load_table(db, table_name)
+        values = _normalize_row_values(table, payload.values)
+        if not values:
+            raise HTTPException(status_code=400, detail="新增数据不能为空")
+
+        missing_required = []
+        for column in table.columns:
+            if column.name in values:
+                continue
+            if (
+                column.nullable
+                or _column_has_default(column)
+                or _column_is_autoincrement_pk(column)
+            ):
+                continue
+            missing_required.append(column.name)
+
+        if missing_required:
+            raise HTTPException(
+                status_code=400,
+                detail=f"缺少必填字段: {', '.join(missing_required)}",
+            )
+
+        result = db.execute(table.insert().values(**values))
+        db.commit()
+
+        pk_payload: dict[str, Any] = {}
+        if primary_keys:
+            inserted_primary_keys = list(result.inserted_primary_key or [])
+            for index, key in enumerate(primary_keys):
+                inserted_value = (
+                    inserted_primary_keys[index]
+                    if index < len(inserted_primary_keys)
+                    else None
+                )
+                if inserted_value is not None:
+                    pk_payload[key] = inserted_value
+                elif key in values:
+                    pk_payload[key] = values[key]
+
+        row = None
+        if primary_keys and len(pk_payload) == len(primary_keys):
+            where_clause, _, _ = _build_pk_where_clause(table, pk_payload)
+            row = _read_row_by_pk(db, table, where_clause)
+
+        return ApiResponse(
+            data={
+                "table": table_name,
+                "pk": pk_payload,
+                "row": row,
+            }
+        )
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"写入失败: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"新增失败: {exc}") from exc
+
+
+@router.put("/db/table/{table_name}/row", response_model=ApiResponse)
+def update_db_row(
+    table_name: str,
+    payload: DBRowUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        table, _, primary_keys = _load_table(db, table_name)
+        if not primary_keys:
+            raise HTTPException(status_code=400, detail="当前表没有主键，无法更新")
+
+        if not payload.values:
+            raise HTTPException(status_code=400, detail="更新数据不能为空")
+
+        values = _normalize_row_values(table, payload.values)
+        for pk_name in primary_keys:
+            values.pop(pk_name, None)
+
+        if not values:
+            raise HTTPException(status_code=400, detail="没有可更新的字段")
+
+        where_clause, pk_values, _ = _build_pk_where_clause(table, payload.pk)
+
+        exists = _read_row_by_pk(db, table, where_clause)
+        if not exists:
+            raise HTTPException(status_code=404, detail="记录不存在")
+
+        db.execute(table.update().where(where_clause).values(**values))
+        db.commit()
+
+        row = _read_row_by_pk(db, table, where_clause)
+        return ApiResponse(
+            data={
+                "table": table_name,
+                "pk": pk_values,
+                "row": row,
+            }
+        )
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"更新失败: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"更新失败: {exc}") from exc
+
+
+@router.delete("/db/table/{table_name}/row", response_model=ApiResponse)
+def delete_db_row(
+    table_name: str,
+    payload: DBRowDeleteRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        table, _, _ = _load_table(db, table_name)
+        where_clause, pk_values, _ = _build_pk_where_clause(table, payload.pk)
+
+        row = _read_row_by_pk(db, table, where_clause)
+        if not row:
+            raise HTTPException(status_code=404, detail="记录不存在")
+
+        db.execute(table.delete().where(where_clause))
+        db.commit()
+
+        return ApiResponse(
+            data={
+                "table": table_name,
+                "pk": pk_values,
+                "deleted": row,
+            }
+        )
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"删除失败: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"删除失败: {exc}") from exc
 
 
 @router.get("/mcp/config", response_model=ApiResponse)
