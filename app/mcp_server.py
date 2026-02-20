@@ -10,7 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from app.core.config import settings
 
-SERVER_NAME = "we-mp-mini-articles"
+SERVER_NAME = "mp-data-console"
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 100
 DEFAULT_MAX_CHARS = 12000

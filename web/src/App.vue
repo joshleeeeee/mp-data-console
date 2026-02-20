@@ -107,6 +107,17 @@ const mcp = reactive({
   config_json: '',
   file_path: '',
   install_steps: [],
+  opencode_config_json: '',
+  opencode_file_path: '',
+  opencode_install_steps: [],
+  codex_config_toml: '',
+  codex_file_path: '',
+  codex_install_steps: [],
+  codex_cli_add_command: '',
+  claude_mcp_docs_url: 'https://code.claude.com/docs/en/mcp',
+  codex_mcp_docs_url: 'https://developers.openai.com/codex/mcp/',
+  opencode_docs_url: 'https://opencode.ai/docs/config/',
+  opencode_mcp_docs_url: 'https://opencode.ai/docs/mcp-servers/',
   tools: [],
 })
 
@@ -124,8 +135,8 @@ const statusMeta = {
 
 const viewMeta = {
   capture: { label: '抓取', desc: '登录并抓取文章', icon: 'sparkles' },
+  mcp: { label: 'MCP 接入', desc: '接入 Claude / Cursor / OpenCode / Codex', icon: 'plug' },
   database: { label: '数据库', desc: '网页查看表和数据', icon: 'database' },
-  mcp: { label: 'MCP 配置', desc: '一键生成可用配置', icon: 'plug' },
 }
 
 const currentStatus = computed(() => statusMeta[session.status] || statusMeta.unknown)
@@ -995,8 +1006,25 @@ async function loadMcpConfig() {
     const data = await api('/ops/mcp/config')
     mcp.server_name = data.server_name || ''
     mcp.database_path = data.database_path || ''
-    mcp.config_json = data.config_json || ''
-    mcp.install_steps = Array.isArray(data.install_steps) ? data.install_steps : []
+    mcp.config_json = data.claude_config_json || data.config_json || ''
+    mcp.install_steps = Array.isArray(data.claude_install_steps)
+      ? data.claude_install_steps
+      : Array.isArray(data.install_steps)
+        ? data.install_steps
+        : []
+    mcp.opencode_config_json = data.opencode_config_json || ''
+    mcp.opencode_install_steps = Array.isArray(data.opencode_install_steps)
+      ? data.opencode_install_steps
+      : []
+    mcp.codex_config_toml = data.codex_config_toml || ''
+    mcp.codex_install_steps = Array.isArray(data.codex_install_steps)
+      ? data.codex_install_steps
+      : []
+    mcp.codex_cli_add_command = data.codex_cli_add_command || ''
+    mcp.claude_mcp_docs_url = data.claude_mcp_docs_url || 'https://code.claude.com/docs/en/mcp'
+    mcp.codex_mcp_docs_url = data.codex_mcp_docs_url || 'https://developers.openai.com/codex/mcp/'
+    mcp.opencode_docs_url = data.opencode_docs_url || 'https://opencode.ai/docs/config/'
+    mcp.opencode_mcp_docs_url = data.opencode_mcp_docs_url || 'https://opencode.ai/docs/mcp-servers/'
     mcp.tools = Array.isArray(data.tools) ? data.tools : []
   } catch (err) {
     setNotice('error', err.message || '读取 MCP 配置失败')
@@ -1010,8 +1038,27 @@ async function generateMcpFile() {
   try {
     const data = await api('/ops/mcp/generate-file', { method: 'POST' })
     mcp.file_path = data.file_path || ''
-    mcp.config_json = data.config_json || mcp.config_json
-    mcp.install_steps = Array.isArray(data.install_steps) ? data.install_steps : mcp.install_steps
+    mcp.opencode_file_path = data.opencode_file_path || ''
+    mcp.codex_file_path = data.codex_file_path || ''
+    mcp.config_json = data.claude_config_json || data.config_json || mcp.config_json
+    mcp.install_steps = Array.isArray(data.claude_install_steps)
+      ? data.claude_install_steps
+      : Array.isArray(data.install_steps)
+        ? data.install_steps
+        : mcp.install_steps
+    mcp.opencode_config_json = data.opencode_config_json || mcp.opencode_config_json
+    mcp.opencode_install_steps = Array.isArray(data.opencode_install_steps)
+      ? data.opencode_install_steps
+      : mcp.opencode_install_steps
+    mcp.codex_config_toml = data.codex_config_toml || mcp.codex_config_toml
+    mcp.codex_install_steps = Array.isArray(data.codex_install_steps)
+      ? data.codex_install_steps
+      : mcp.codex_install_steps
+    mcp.codex_cli_add_command = data.codex_cli_add_command || mcp.codex_cli_add_command
+    mcp.claude_mcp_docs_url = data.claude_mcp_docs_url || mcp.claude_mcp_docs_url
+    mcp.codex_mcp_docs_url = data.codex_mcp_docs_url || mcp.codex_mcp_docs_url
+    mcp.opencode_docs_url = data.opencode_docs_url || mcp.opencode_docs_url
+    mcp.opencode_mcp_docs_url = data.opencode_mcp_docs_url || mcp.opencode_mcp_docs_url
     mcp.tools = Array.isArray(data.tools) ? data.tools : mcp.tools
     setNotice('success', '配置文件已生成')
   } catch (err) {
@@ -1564,7 +1611,7 @@ onBeforeUnmount(() => {
         <section class="panel-grid panel-grid--single">
           <article class="panel panel--wide">
             <header class="panel__head">
-              <h3 class="title-row"><AppIcon name="plug" :size="16" /> MCP 一键配置</h3>
+              <h3 class="title-row"><AppIcon name="plug" :size="16" /> MCP 接入配置</h3>
               <div class="actions">
                 <button class="btn" :disabled="busy.mcp" @click="loadMcpConfig">
                   <span class="btn__inner">
@@ -1584,14 +1631,45 @@ onBeforeUnmount(() => {
             <div class="mcp-kv">
               <div><span>Server 名称</span><strong>{{ mcp.server_name || '-' }}</strong></div>
               <div><span>数据库路径</span><code>{{ mcp.database_path || '-' }}</code></div>
-              <div v-if="mcp.file_path"><span>配置文件</span><code>{{ mcp.file_path }}</code></div>
+              <div v-if="mcp.file_path"><span>Claude/Cursor 配置文件</span><code>{{ mcp.file_path }}</code></div>
+              <div v-if="mcp.opencode_file_path"><span>OpenCode 配置片段文件</span><code>{{ mcp.opencode_file_path }}</code></div>
+              <div v-if="mcp.codex_file_path"><span>Codex 配置片段文件</span><code>{{ mcp.codex_file_path }}</code></div>
             </div>
 
             <div class="mcp-guide" v-if="mcp.install_steps.length">
-              <h4>安装与接入步骤</h4>
+              <h4>Claude / Cursor 接入步骤</h4>
               <ol>
                 <li v-for="(step, idx) in mcp.install_steps" :key="`${idx}-${step}`">{{ step }}</li>
               </ol>
+              <p class="mcp-guide__links">
+                官方文档：
+                <a :href="mcp.claude_mcp_docs_url" target="_blank" rel="noreferrer">Claude Code MCP</a>
+              </p>
+            </div>
+
+            <div class="mcp-guide" v-if="mcp.opencode_install_steps.length">
+              <h4>OpenCode 配置步骤</h4>
+              <ol>
+                <li v-for="(step, idx) in mcp.opencode_install_steps" :key="`opencode-${idx}-${step}`">{{ step }}</li>
+              </ol>
+              <p class="mcp-guide__links">
+                官方文档：
+                <a :href="mcp.opencode_mcp_docs_url" target="_blank" rel="noreferrer">MCP Servers</a>
+                <span> · </span>
+                <a :href="mcp.opencode_docs_url" target="_blank" rel="noreferrer">Config</a>
+              </p>
+            </div>
+
+            <div class="mcp-guide" v-if="mcp.codex_install_steps.length">
+              <h4>Codex 配置步骤</h4>
+              <ol>
+                <li v-for="(step, idx) in mcp.codex_install_steps" :key="`codex-${idx}-${step}`">{{ step }}</li>
+              </ol>
+              <p class="mcp-guide__links">
+                官方文档：
+                <a :href="mcp.codex_mcp_docs_url" target="_blank" rel="noreferrer">Codex MCP</a>
+              </p>
+              <pre class="mcp-command" v-if="mcp.codex_cli_add_command">{{ mcp.codex_cli_add_command }}</pre>
             </div>
 
             <div class="mcp-guide" v-if="mcp.tools.length">
@@ -1605,10 +1683,28 @@ onBeforeUnmount(() => {
             </div>
 
             <div class="actions actions--mcp">
-              <button class="btn" @click="copyText(mcp.config_json, 'MCP配置')">
+              <button class="btn" @click="copyText(mcp.config_json, 'Claude/Cursor MCP配置 JSON')">
                 <span class="btn__inner">
                   <AppIcon name="copy" :size="15" />
-                  <span>复制配置 JSON</span>
+                  <span>复制 Claude/Cursor 配置</span>
+                </span>
+              </button>
+              <button class="btn" @click="copyText(mcp.opencode_config_json, 'OpenCode 配置 JSON')">
+                <span class="btn__inner">
+                  <AppIcon name="copy" :size="15" />
+                  <span>复制 OpenCode 配置</span>
+                </span>
+              </button>
+              <button class="btn" @click="copyText(mcp.codex_config_toml, 'Codex 配置 TOML')">
+                <span class="btn__inner">
+                  <AppIcon name="copy" :size="15" />
+                  <span>复制 Codex 配置</span>
+                </span>
+              </button>
+              <button class="btn" @click="copyText(mcp.codex_cli_add_command, 'Codex MCP add 命令')">
+                <span class="btn__inner">
+                  <AppIcon name="copy" :size="15" />
+                  <span>复制 Codex CLI 命令</span>
                 </span>
               </button>
               <button class="btn" @click="copyText(mcp.database_path, '数据库路径')">
@@ -1619,7 +1715,20 @@ onBeforeUnmount(() => {
               </button>
             </div>
 
-            <textarea class="mcp-textarea" readonly :value="mcp.config_json"></textarea>
+            <div class="mcp-guide">
+              <h4>Claude / Cursor 配置 JSON</h4>
+              <textarea class="mcp-textarea mcp-textarea--compact" readonly :value="mcp.config_json"></textarea>
+            </div>
+
+            <div class="mcp-guide">
+              <h4>OpenCode 配置片段（opencode.json）</h4>
+              <textarea class="mcp-textarea mcp-textarea--compact" readonly :value="mcp.opencode_config_json"></textarea>
+            </div>
+
+            <div class="mcp-guide">
+              <h4>Codex 配置片段（config.toml）</h4>
+              <textarea class="mcp-textarea mcp-textarea--compact" readonly :value="mcp.codex_config_toml"></textarea>
+            </div>
           </article>
         </section>
       </template>

@@ -1016,6 +1016,32 @@ tbody td span {
   line-height: 1.45;
 }
 
+.mcp-guide__links {
+  margin: 9px 0 0;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+}
+
+.mcp-guide__links a {
+  color: #0f766e;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.mcp-command {
+  margin: 9px 0 0;
+  padding: 9px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.86);
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 .mcp-guide code {
   margin-right: 6px;
   font-family: 'IBM Plex Mono', monospace;
@@ -1035,6 +1061,11 @@ tbody td span {
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.8rem;
   line-height: 1.45;
+}
+
+.mcp-textarea--compact {
+  min-height: 180px;
+  margin-top: 8px;
 }
 
 .empty {
