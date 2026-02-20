@@ -112,9 +112,6 @@ def create_sync_job(mp_id: str, payload: MPSyncRequest, db: Session = Depends(ge
         job = capture_job_service.create_job(
             db,
             mp=mp,
-            pages=payload.pages,
-            fetch_content=payload.fetch_content,
-            target_count=payload.target_count,
             start_ts=start_ts,
             end_ts=end_ts,
         )
@@ -165,9 +162,8 @@ def sync_mp(mp_id: str, payload: MPSyncRequest, db: Session = Depends(get_db)):
         result = article_service.sync_mp_articles(
             db,
             mp=mp,
-            pages=payload.pages,
-            fetch_content=payload.fetch_content,
-            target_count=payload.target_count,
+            pages=capture_job_service.RANGE_CAPTURE_PAGE_LIMIT,
+            fetch_content=True,
             start_ts=start_ts,
             end_ts=end_ts,
         )

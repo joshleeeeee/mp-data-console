@@ -18,6 +18,7 @@ def utcnow() -> datetime:
 
 class CaptureJobService:
     ACTIVE_STATUSES = ("queued", "running")
+    RANGE_CAPTURE_PAGE_LIMIT = 300
 
     def __init__(self) -> None:
         self._worker_lock = threading.Lock()
@@ -83,11 +84,8 @@ class CaptureJobService:
             "mp_id": job.mp_id,
             "mp_nickname": job.mp_nickname,
             "status": job.status,
-            "pages_hint": job.pages_hint,
-            "requested_count": job.requested_count,
             "start_ts": job.start_ts,
             "end_ts": job.end_ts,
-            "fetch_content": job.fetch_content,
             "created": job.created_count,
             "updated": job.updated_count,
             "content_updated": job.content_updated_count,
@@ -143,9 +141,6 @@ class CaptureJobService:
         self,
         db: Session,
         mp: MPAccount,
-        pages: int,
-        fetch_content: bool,
-        target_count: int | None = None,
         start_ts: int | None = None,
         end_ts: int | None = None,
     ) -> dict[str, Any]:
@@ -155,28 +150,24 @@ class CaptureJobService:
                 f"已有抓取任务在执行（{active_job.id}），请等待当前任务完成后再发起新任务"
             )
 
-        pages_hint = max(1, int(pages))
-        has_date_range = start_ts is not None or end_ts is not None
-        requested_count = (
-            0
-            if has_date_range
-            else (
-                max(1, int(target_count))
-                if target_count is not None
-                else pages_hint * 5
-            )
-        )
+        if start_ts is None or end_ts is None:
+            raise ValueError("必须指定抓取时间范围")
+
+        start = int(start_ts)
+        end = int(end_ts)
+        if start > end:
+            start, end = end, start
 
         job = CaptureJob(
             id=self._new_job_id(),
             mp_id=mp.id,
             mp_nickname=mp.nickname,
             status="queued",
-            pages_hint=pages_hint,
-            requested_count=requested_count,
-            start_ts=start_ts,
-            end_ts=end_ts,
-            fetch_content=bool(fetch_content),
+            pages_hint=self.RANGE_CAPTURE_PAGE_LIMIT,
+            requested_count=0,
+            start_ts=start,
+            end_ts=end,
+            fetch_content=True,
         )
         db.add(job)
         db.commit()
@@ -241,8 +232,7 @@ class CaptureJobService:
                     db,
                     mp=mp,
                     pages=job.pages_hint,
-                    fetch_content=job.fetch_content,
-                    target_count=job.requested_count,
+                    fetch_content=True,
                     start_ts=job.start_ts,
                     end_ts=job.end_ts,
                     progress_callback=on_progress,

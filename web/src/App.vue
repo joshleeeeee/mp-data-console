@@ -49,7 +49,6 @@ const busy = reactive({
 const qrImageUrl = ref('')
 const isPolling = ref(false)
 
-const captureRangeMaxPages = 300
 const savedMpQuickRangeDays = [7, 30, 90, 180]
 
 function toDateInputValue(date) {
@@ -367,7 +366,7 @@ const captureJobProgressText = computed(() => {
   const maxPages = Number(captureJob.value.max_pages || 0)
   const duplicated = Number(captureJob.value.duplicates_skipped || 0)
   const pageText = maxPages > 0 ? `${scanned}/${maxPages}` : `${scanned}`
-  return `${targetText} · 新增 ${created} · 跳过重复 ${duplicated} · 扫描页数 ${pageText}`
+  return `${targetText} · 新增 ${created} · 跳过重复 ${duplicated} · 扫描进度 ${pageText}`
 })
 
 const dbRangeText = computed(() => {
@@ -760,9 +759,6 @@ function resolveCaptureJobOptions(options = null) {
     range_days,
     date_start,
     date_end,
-    fetch_content: true,
-    pages: captureRangeMaxPages,
-    target_count: null,
   }
 }
 
@@ -963,7 +959,7 @@ function buildCaptureResultFromJob(job) {
       content_updated: Number(job?.content_updated || 0),
       duplicates_skipped: Number(job?.duplicates_skipped || 0),
       scanned_pages: Number(job?.scanned_pages || 0),
-      pages: Number(job?.pages_hint || 0),
+      pages: Number(job?.max_pages || 0),
     },
     requested_count: Number(job?.requested_count || 0),
     start_ts: Number(job?.start_ts || 0),
@@ -1200,11 +1196,8 @@ async function submitCaptureJobByMpId(mpId, options = null) {
   const job = await api(`/mps/${encodeURIComponent(mpId)}/sync/jobs`, {
     method: 'POST',
     body: {
-      pages: resolved.pages,
-      target_count: resolved.target_count,
       date_start: resolved.date_start,
       date_end: resolved.date_end,
-      fetch_content: resolved.fetch_content,
     },
   })
 
@@ -2070,7 +2063,7 @@ onBeforeUnmount(() => {
                   已写入 <strong>{{ captureResult.mp.nickname }}</strong>，{{ captureTargetText(captureResult) }}，
                   新增 {{ captureResult.sync.created }}，更新 {{ captureResult.sync.updated }}，
                   跳过重复 {{ captureResult.sync.duplicates_skipped || 0 }}，
-                  扫描 {{ captureResult.sync.scanned_pages || captureResult.sync.pages }} 页。
+                  扫描进度 {{ captureResult.sync.scanned_pages || captureResult.sync.pages }}。
                 </p>
               </div>
 
