@@ -33,6 +33,10 @@ const busy = reactive({
   search: false,
   capture: false,
   captureStatus: false,
+  captureJobs: false,
+  captureJobAction: '',
+  captureJobDetail: false,
+  captureJobLogs: false,
   favoriteMp: '',
   mps: false,
   articles: false,
@@ -176,6 +180,26 @@ const mpSearchTotal = ref(0)
 const selectedCandidate = ref(null)
 const captureJob = ref(null)
 const captureResult = ref(null)
+const captureJobs = ref([])
+const captureJobsTotal = ref(0)
+
+const captureJobFilter = reactive({
+  status: '',
+  mp_id: '',
+  keyword: '',
+  offset: 0,
+  limit: 10,
+})
+
+const captureJobDetail = reactive({
+  open: false,
+  id: '',
+  job: null,
+  logs: [],
+  logTotal: 0,
+  logOffset: 0,
+  logLimit: 200,
+})
 
 const mps = ref([])
 
@@ -220,6 +244,7 @@ const dbView = reactive({
 
 const dbLimitOptions = [20, 50, 100, 200]
 const articleLimitOptions = [12, 24, 48, 96]
+const captureJobLimitOptions = [10, 20, 50]
 const articleLimitStorageKey = 'wemp.console.article.limit'
 const savedMpCaptureStorageKey = 'wemp.console.saved.mp.capture'
 const customCaptureRangesStorageKey = 'wemp.console.capture.custom.ranges'
@@ -287,6 +312,7 @@ const captureJobStatusMeta = {
   running: { label: '抓取中', tone: 'warn' },
   success: { label: '已完成', tone: 'good' },
   failed: { label: '失败', tone: 'bad' },
+  canceled: { label: '已取消', tone: 'muted' },
 }
 
 const currentCaptureJobStatus = computed(() => {
@@ -294,7 +320,7 @@ const currentCaptureJobStatus = computed(() => {
   if (!status) {
     return { label: '未开始', tone: 'muted' }
   }
-  return captureJobStatusMeta[status] || { label: status, tone: 'muted' }
+  return captureJobStatusInfo(status)
 })
 
 const hasActiveCaptureJob = computed(() => {
@@ -355,6 +381,129 @@ function captureTargetText(payload) {
   return '按时间范围'
 }
 
+function captureJobStatusInfo(status) {
+  return captureJobStatusMeta[status] || { label: status || '-', tone: 'muted' }
+}
+
+function captureJobRangeLabel(payload) {
+  const text = captureDateRangeText(payload?.start_ts, payload?.end_ts)
+  return text || '-'
+}
+
+function captureJobMetricsLabel(payload) {
+  if (!payload) {
+    return '-'
+  }
+  const created = Number(payload.created || 0)
+  const updated = Number(payload.updated || 0)
+  const duplicated = Number(payload.duplicates_skipped || 0)
+  const scanned = Number(payload.scanned_pages || 0)
+  const maxPages = Number(payload.max_pages || 0)
+  const pageText = maxPages > 0 ? `${scanned}/${maxPages}` : `${scanned}`
+  return `新增 ${created} · 更新 ${updated} · 重复 ${duplicated} · 进度 ${pageText}`
+}
+
+function isCaptureJobCancelable(job) {
+  const status = job?.status
+  return status === 'queued' || status === 'running'
+}
+
+function isCaptureJobRetryable(job) {
+  const status = job?.status
+  if (status !== 'success' && status !== 'failed' && status !== 'canceled') {
+    return false
+  }
+  return Number(job?.start_ts || 0) > 0 && Number(job?.end_ts || 0) > 0
+}
+
+function captureJobErrorSummary(job) {
+  const text = String(job?.error || '').trim()
+  if (!text) {
+    return ''
+  }
+  return text.length > 72 ? `${text.slice(0, 72)}...` : text
+}
+
+function isCaptureJobActionBusy(jobId, action = '') {
+  const marker = String(busy.captureJobAction || '')
+  if (!marker || !jobId) {
+    return false
+  }
+  if (action) {
+    return marker === `${action}:${jobId}`
+  }
+  return marker.endsWith(`:${jobId}`)
+}
+
+function captureJobLogLevelClass(level) {
+  const value = String(level || '').toLowerCase()
+  if (value === 'error') {
+    return 'task-log__level--error'
+  }
+  if (value === 'warn' || value === 'warning') {
+    return 'task-log__level--warn'
+  }
+  return 'task-log__level--info'
+}
+
+function formatCaptureJobLogPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return ''
+  }
+  try {
+    return JSON.stringify(payload, null, 2)
+  } catch {
+    return ''
+  }
+}
+
+function syncCaptureJobRecord(job) {
+  if (!job?.id) {
+    return
+  }
+
+  if (!captureJobMatchesCurrentFilter(job)) {
+    return
+  }
+
+  const index = captureJobs.value.findIndex((item) => item.id === job.id)
+  if (index >= 0) {
+    captureJobs.value[index] = {
+      ...captureJobs.value[index],
+      ...job,
+    }
+    captureJobs.value = [...captureJobs.value]
+    return
+  }
+
+  captureJobs.value = [job, ...captureJobs.value].slice(0, captureJobFilter.limit)
+}
+
+function captureJobMatchesCurrentFilter(job) {
+  if (!job) {
+    return false
+  }
+
+  const status = String(captureJobFilter.status || '').trim()
+  if (status && job.status !== status) {
+    return false
+  }
+
+  const mpId = String(captureJobFilter.mp_id || '').trim()
+  if (mpId && job.mp_id !== mpId) {
+    return false
+  }
+
+  const keyword = String(captureJobFilter.keyword || '').trim().toLowerCase()
+  if (!keyword) {
+    return true
+  }
+
+  return [job.id, job.mp_nickname, job.error]
+    .map((value) => String(value || '').toLowerCase())
+    .some((value) => value.includes(keyword))
+}
+
 const captureJobProgressText = computed(() => {
   if (!captureJob.value) {
     return ''
@@ -367,6 +516,31 @@ const captureJobProgressText = computed(() => {
   const duplicated = Number(captureJob.value.duplicates_skipped || 0)
   const pageText = maxPages > 0 ? `${scanned}/${maxPages}` : `${scanned}`
   return `${targetText} · 新增 ${created} · 跳过重复 ${duplicated} · 扫描进度 ${pageText}`
+})
+
+const captureJobPageCount = computed(() => {
+  const limit = Math.max(1, Number(captureJobFilter.limit) || 10)
+  const total = Math.max(0, Number(captureJobsTotal.value) || 0)
+  return Math.max(1, Math.ceil(total / limit))
+})
+
+const captureJobCurrentPage = computed(() => {
+  const limit = Math.max(1, Number(captureJobFilter.limit) || 10)
+  return Math.floor(Math.max(0, captureJobFilter.offset) / limit) + 1
+})
+
+const captureJobRangeText = computed(() => {
+  const total = Math.max(0, Number(captureJobsTotal.value) || 0)
+  if (total <= 0) {
+    return '0 / 0'
+  }
+  const start = captureJobFilter.offset + 1
+  const end = Math.min(captureJobFilter.offset + captureJobFilter.limit, total)
+  return `${start}-${end} / ${total}`
+})
+
+const captureJobDetailStatus = computed(() => {
+  return captureJobStatusInfo(captureJobDetail.job?.status)
 })
 
 const dbRangeText = computed(() => {
@@ -971,6 +1145,13 @@ function buildCaptureResultFromJob(job) {
 async function applyCaptureJobUpdate(job, silent = false) {
   captureJob.value = job || null
 
+  if (job) {
+    syncCaptureJobRecord(job)
+    if (captureJobDetail.open && captureJobDetail.id === job.id) {
+      captureJobDetail.job = job
+    }
+  }
+
   if (!job) {
     stopCaptureJobPolling()
     return
@@ -995,23 +1176,34 @@ async function applyCaptureJobUpdate(job, silent = false) {
     await Promise.all([loadOverview(), loadMps(), loadArticles()])
 
     if (!silent && lastCaptureJobNoticeId !== job.id) {
-      const requested = Number(job.requested_count || 0)
-      if (job.reached_target || requested <= 0) {
-        setNotice('success', '后台抓取完成，结果已更新')
-      } else {
-        setNotice(
-          'warn',
-          `后台抓取完成：目标 ${requested} 条，实际新增 ${job.created} 条（可能源数据不足）`,
-        )
-      }
+      setNotice('success', '后台抓取完成，结果已更新')
       lastCaptureJobNoticeId = job.id
     }
+
+    if (captureJobDetail.open && captureJobDetail.id === job.id) {
+      await loadCaptureJobLogs(job.id, true)
+    }
+
     return
+  }
+
+  if (job.status === 'failed' || job.status === 'canceled') {
+    if (job.mp_id) {
+      articleFilter.mp_id = job.mp_id
+    }
+    await Promise.all([loadOverview(), loadMps(), loadArticles()])
   }
 
   if (job.status === 'failed' && !silent && lastCaptureJobNoticeId !== job.id) {
     setNotice('error', job.error || '后台抓取失败')
     lastCaptureJobNoticeId = job.id
+  } else if (job.status === 'canceled' && !silent && lastCaptureJobNoticeId !== job.id) {
+    setNotice('warn', job.error || '任务已取消')
+    lastCaptureJobNoticeId = job.id
+  }
+
+  if (captureJobDetail.open && captureJobDetail.id === job.id) {
+    await loadCaptureJobLogs(job.id, true)
   }
 }
 
@@ -1032,6 +1224,238 @@ async function refreshCaptureJob(silent = false) {
   } finally {
     busy.captureStatus = false
     captureJobRefreshPending = false
+  }
+}
+
+async function loadCaptureJobs(silent = false) {
+  busy.captureJobs = !silent
+  try {
+    const query = new URLSearchParams({
+      offset: String(captureJobFilter.offset || 0),
+      limit: String(captureJobFilter.limit || 10),
+    })
+
+    if (captureJobFilter.status) {
+      query.set('status', captureJobFilter.status)
+    }
+    if (captureJobFilter.mp_id) {
+      query.set('mp_id', captureJobFilter.mp_id)
+    }
+    if (captureJobFilter.keyword.trim()) {
+      query.set('keyword', captureJobFilter.keyword.trim())
+    }
+
+    const data = await api(`/mps/sync/jobs?${query.toString()}`)
+    captureJobs.value = Array.isArray(data?.list) ? data.list : []
+    captureJobsTotal.value = Number(data?.total || 0)
+
+    const usingDefaultFilter =
+      !captureJobFilter.status && !captureJobFilter.mp_id && !captureJobFilter.keyword.trim()
+    if (usingDefaultFilter) {
+      const active = captureJobs.value.find((item) => item.status === 'queued' || item.status === 'running')
+      if (active && captureJob.value?.id !== active.id) {
+        await applyCaptureJobUpdate(active, true)
+      } else if (!captureJob.value && captureJobs.value.length) {
+        captureJob.value = captureJobs.value[0]
+      }
+    }
+
+    if (!captureJobs.value.length && captureJobsTotal.value > 0 && captureJobFilter.offset > 0) {
+      const maxOffset = Math.max(0, (Math.ceil(captureJobsTotal.value / captureJobFilter.limit) - 1) * captureJobFilter.limit)
+      if (maxOffset !== captureJobFilter.offset) {
+        captureJobFilter.offset = maxOffset
+        await loadCaptureJobs(true)
+      }
+    }
+  } catch (err) {
+    if (!silent) {
+      setNotice('error', err.message || '加载任务列表失败')
+    }
+  } finally {
+    busy.captureJobs = false
+  }
+}
+
+function applyCaptureJobFilters() {
+  if (busy.captureJobs) {
+    return
+  }
+  captureJobFilter.offset = 0
+  loadCaptureJobs()
+}
+
+function resetCaptureJobFilters() {
+  captureJobFilter.status = ''
+  captureJobFilter.mp_id = ''
+  captureJobFilter.keyword = ''
+  captureJobFilter.offset = 0
+  loadCaptureJobs()
+}
+
+function goToCaptureJobPage(page) {
+  const target = Math.min(captureJobPageCount.value, Math.max(1, Number(page) || 1))
+  const nextOffset = (target - 1) * captureJobFilter.limit
+  if (nextOffset === captureJobFilter.offset) {
+    return
+  }
+  captureJobFilter.offset = nextOffset
+  loadCaptureJobs()
+}
+
+function changeCaptureJobPage(step) {
+  goToCaptureJobPage(captureJobCurrentPage.value + step)
+}
+
+function changeCaptureJobPageSize() {
+  const parsed = Number(captureJobFilter.limit)
+  captureJobFilter.limit = captureJobLimitOptions.includes(parsed) ? parsed : 10
+  captureJobFilter.offset = 0
+  loadCaptureJobs()
+}
+
+function closeCaptureJobDetail() {
+  captureJobDetail.open = false
+  captureJobDetail.id = ''
+  captureJobDetail.job = null
+  captureJobDetail.logs = []
+  captureJobDetail.logTotal = 0
+  captureJobDetail.logOffset = 0
+}
+
+async function loadCaptureJobDetail(jobId = '', silent = false) {
+  const targetId = jobId || captureJobDetail.id
+  if (!targetId) {
+    return
+  }
+
+  busy.captureJobDetail = !silent
+  try {
+    const data = await api(`/mps/sync/jobs/${encodeURIComponent(targetId)}`)
+    captureJobDetail.job = data
+    syncCaptureJobRecord(data)
+
+    if (captureJob.value?.id === data.id) {
+      await applyCaptureJobUpdate(data, true)
+    }
+  } catch (err) {
+    if (!silent) {
+      setNotice('error', err.message || '读取任务详情失败')
+    }
+  } finally {
+    busy.captureJobDetail = false
+  }
+}
+
+async function loadCaptureJobLogs(jobId = '', silent = false) {
+  const targetId = jobId || captureJobDetail.id
+  if (!targetId) {
+    return
+  }
+
+  busy.captureJobLogs = !silent
+  try {
+    const query = new URLSearchParams({
+      offset: String(captureJobDetail.logOffset || 0),
+      limit: String(captureJobDetail.logLimit || 200),
+    })
+    const data = await api(`/mps/sync/jobs/${encodeURIComponent(targetId)}/logs?${query.toString()}`)
+    captureJobDetail.logs = Array.isArray(data?.list) ? data.list : []
+    captureJobDetail.logTotal = Number(data?.total || 0)
+  } catch (err) {
+    if (!silent) {
+      setNotice('error', err.message || '读取任务日志失败')
+    }
+  } finally {
+    busy.captureJobLogs = false
+  }
+}
+
+async function openCaptureJobDetail(job) {
+  if (!job?.id) {
+    return
+  }
+
+  captureJobDetail.open = true
+  captureJobDetail.id = job.id
+  captureJobDetail.job = job
+  captureJobDetail.logs = []
+  captureJobDetail.logTotal = 0
+  captureJobDetail.logOffset = 0
+
+  await Promise.all([
+    loadCaptureJobDetail(job.id, false),
+    loadCaptureJobLogs(job.id, false),
+  ])
+}
+
+async function refreshCaptureJobDetail() {
+  if (!captureJobDetail.id) {
+    return
+  }
+  await Promise.all([
+    loadCaptureJobDetail(captureJobDetail.id, false),
+    loadCaptureJobLogs(captureJobDetail.id, false),
+  ])
+}
+
+async function cancelCaptureJob(job) {
+  if (!job?.id || !isCaptureJobCancelable(job)) {
+    return
+  }
+
+  busy.captureJobAction = `cancel:${job.id}`
+  try {
+    const next = await api(`/mps/sync/jobs/${encodeURIComponent(job.id)}/cancel`, {
+      method: 'POST',
+    })
+
+    if (captureJob.value?.id === next.id) {
+      await applyCaptureJobUpdate(next, true)
+    } else {
+      syncCaptureJobRecord(next)
+    }
+
+    if (captureJobDetail.open && captureJobDetail.id === next.id) {
+      captureJobDetail.job = next
+      await loadCaptureJobLogs(next.id, true)
+    }
+
+    await loadCaptureJobs(true)
+    setNotice('info', '任务取消请求已提交')
+  } catch (err) {
+    setNotice('error', err.message || '取消任务失败')
+  } finally {
+    busy.captureJobAction = ''
+  }
+}
+
+async function retryCaptureJob(job) {
+  if (!job?.id || !isCaptureJobRetryable(job)) {
+    return
+  }
+
+  busy.captureJobAction = `retry:${job.id}`
+  try {
+    const next = await api(`/mps/sync/jobs/${encodeURIComponent(job.id)}/retry`, {
+      method: 'POST',
+    })
+
+    await applyCaptureJobUpdate(next, true)
+    await loadCaptureJobs(true)
+
+    if (captureJobDetail.open && captureJobDetail.id === job.id) {
+      captureJobDetail.id = next.id
+      captureJobDetail.job = next
+      captureJobDetail.logs = []
+      captureJobDetail.logTotal = 0
+      await loadCaptureJobLogs(next.id, true)
+    }
+
+    setNotice('success', '已按原参数重新发起任务')
+  } catch (err) {
+    setNotice('error', err.message || '重试任务失败')
+  } finally {
+    busy.captureJobAction = ''
   }
 }
 
@@ -1102,7 +1526,7 @@ async function checkAuthStatus(silent = false) {
 
     if (session.status === 'logged_in') {
       stopPolling()
-      await Promise.all([loadOverview(), loadMps(), loadArticles()])
+      await Promise.all([loadOverview(), loadMps(), loadArticles(), loadCaptureJobs(true)])
       if (!silent) {
         setNotice('success', '登录成功，准备就绪')
       }
@@ -1204,6 +1628,7 @@ async function submitCaptureJobByMpId(mpId, options = null) {
   captureResult.value = null
   articleFilter.mp_id = mpId
   await applyCaptureJobUpdate(job, true)
+  await loadCaptureJobs(true)
   await Promise.all([loadOverview(), loadMps()])
   return job
 }
@@ -1899,6 +2324,7 @@ onMounted(async () => {
     loadArticles(),
     loadDbTables(),
     loadMcpConfig(),
+    loadCaptureJobs(true),
     loadLatestCaptureJob(),
   ])
   await loadDbRows()
@@ -2055,6 +2481,34 @@ onBeforeUnmount(() => {
                       <span>{{ busy.captureStatus ? '刷新中...' : '刷新任务状态' }}</span>
                     </span>
                   </button>
+                  <button class="btn" :disabled="!captureJob?.id" @click="openCaptureJobDetail(captureJob)">
+                    <span class="btn__inner">
+                      <AppIcon name="eye" :size="15" />
+                      <span>详情</span>
+                    </span>
+                  </button>
+                  <button
+                    v-if="isCaptureJobCancelable(captureJob)"
+                    class="btn btn--danger"
+                    :disabled="isCaptureJobActionBusy(captureJob.id, 'cancel')"
+                    @click="cancelCaptureJob(captureJob)"
+                  >
+                    <span class="btn__inner">
+                      <AppIcon name="pause" :size="15" />
+                      <span>{{ isCaptureJobActionBusy(captureJob.id, 'cancel') ? '取消中...' : '取消任务' }}</span>
+                    </span>
+                  </button>
+                  <button
+                    v-if="isCaptureJobRetryable(captureJob)"
+                    class="btn"
+                    :disabled="isCaptureJobActionBusy(captureJob.id, 'retry')"
+                    @click="retryCaptureJob(captureJob)"
+                  >
+                    <span class="btn__inner">
+                      <AppIcon name="rotate-cw" :size="15" />
+                      <span>{{ isCaptureJobActionBusy(captureJob.id, 'retry') ? '重试中...' : '重试任务' }}</span>
+                    </span>
+                  </button>
                 </div>
               </div>
 
@@ -2135,6 +2589,138 @@ onBeforeUnmount(() => {
                 </div>
 
                 <p v-else class="empty">暂无已保存公众号，先搜索并提交一次抓取任务。</p>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <header class="panel__head">
+              <h3 class="title-row"><AppIcon name="database" :size="16" /> 任务中心</h3>
+              <div class="actions">
+                <button class="btn" :disabled="busy.captureJobs" @click="loadCaptureJobs(false)">
+                  <span class="btn__inner">
+                    <AppIcon name="refresh" :size="15" />
+                    <span>{{ busy.captureJobs ? '刷新中...' : '刷新列表' }}</span>
+                  </span>
+                </button>
+              </div>
+            </header>
+
+            <div class="task-center__filters">
+              <select v-model="captureJobFilter.status" @change="applyCaptureJobFilters">
+                <option value="">全部状态</option>
+                <option v-for="(meta, key) in captureJobStatusMeta" :key="`capture-status-${key}`" :value="key">
+                  {{ meta.label }}
+                </option>
+              </select>
+              <select v-model="captureJobFilter.mp_id" @change="applyCaptureJobFilters">
+                <option value="">全部公众号</option>
+                <option v-for="item in mps" :key="`capture-filter-mp-${item.id}`" :value="item.id">
+                  {{ item.nickname || item.id }}
+                </option>
+              </select>
+              <input
+                v-model="captureJobFilter.keyword"
+                type="text"
+                placeholder="任务ID/公众号/错误关键词"
+                @keyup.enter="applyCaptureJobFilters"
+              />
+              <select v-model.number="captureJobFilter.limit" @change="changeCaptureJobPageSize">
+                <option v-for="size in captureJobLimitOptions" :key="`capture-job-limit-${size}`" :value="size">
+                  每页 {{ size }} 条
+                </option>
+              </select>
+              <button class="btn" :disabled="busy.captureJobs" @click="applyCaptureJobFilters">
+                <span class="btn__inner">
+                  <AppIcon name="search" :size="14" />
+                  <span>筛选</span>
+                </span>
+              </button>
+              <button class="btn" :disabled="busy.captureJobs" @click="resetCaptureJobFilters">
+                <span class="btn__inner">
+                  <AppIcon name="x" :size="14" />
+                  <span>清空</span>
+                </span>
+              </button>
+            </div>
+
+            <div v-if="busy.captureJobs" class="task-center__loading">任务列表加载中...</div>
+
+            <div v-else-if="captureJobs.length" class="task-center__list">
+              <article class="task-row" v-for="job in captureJobs" :key="job.id">
+                <div class="task-row__head">
+                  <span class="capture-job__status" :class="`capture-job__status--${captureJobStatusInfo(job.status).tone}`">
+                    {{ captureJobStatusInfo(job.status).label }}
+                  </span>
+                  <code>{{ job.id }}</code>
+                </div>
+                <p class="task-row__line">
+                  <strong>{{ job.mp_nickname || job.mp_id }}</strong>
+                  <span> · {{ captureJobRangeLabel(job) }}</span>
+                </p>
+                <p class="task-row__line">{{ captureJobMetricsLabel(job) }}</p>
+                <p class="task-row__line task-row__line--muted">
+                  创建 {{ formatDateTime(job.created_at) }} · 结束 {{ formatDateTime(job.finished_at) }}
+                </p>
+                <p class="task-row__line task-row__line--error" v-if="job.error">{{ captureJobErrorSummary(job) }}</p>
+                <div class="task-row__actions">
+                  <button class="btn" :disabled="isCaptureJobActionBusy(job.id)" @click="openCaptureJobDetail(job)">
+                    <span class="btn__inner">
+                      <AppIcon name="eye" :size="14" />
+                      <span>详情</span>
+                    </span>
+                  </button>
+                  <button
+                    v-if="isCaptureJobCancelable(job)"
+                    class="btn btn--danger"
+                    :disabled="isCaptureJobActionBusy(job.id, 'cancel')"
+                    @click="cancelCaptureJob(job)"
+                  >
+                    <span class="btn__inner">
+                      <AppIcon name="pause" :size="14" />
+                      <span>{{ isCaptureJobActionBusy(job.id, 'cancel') ? '取消中...' : '取消' }}</span>
+                    </span>
+                  </button>
+                  <button
+                    v-if="isCaptureJobRetryable(job)"
+                    class="btn"
+                    :disabled="isCaptureJobActionBusy(job.id, 'retry')"
+                    @click="retryCaptureJob(job)"
+                  >
+                    <span class="btn__inner">
+                      <AppIcon name="rotate-cw" :size="14" />
+                      <span>{{ isCaptureJobActionBusy(job.id, 'retry') ? '重试中...' : '重试' }}</span>
+                    </span>
+                  </button>
+                </div>
+              </article>
+            </div>
+
+            <p v-else class="empty">暂无任务记录。</p>
+
+            <div class="task-center__pager">
+              <span>{{ captureJobRangeText }} · 第 {{ captureJobCurrentPage }} / {{ captureJobPageCount }} 页</span>
+              <div class="task-center__pager-actions">
+                <button
+                  class="btn"
+                  :disabled="busy.captureJobs || captureJobCurrentPage <= 1"
+                  @click="changeCaptureJobPage(-1)"
+                >
+                  <span class="btn__inner">
+                    <AppIcon name="arrow-left" :size="14" />
+                    <span>上一页</span>
+                  </span>
+                </button>
+                <button
+                  class="btn"
+                  :disabled="busy.captureJobs || captureJobCurrentPage >= captureJobPageCount"
+                  @click="changeCaptureJobPage(1)"
+                >
+                  <span class="btn__inner">
+                    <span>下一页</span>
+                    <AppIcon name="arrow-right" :size="14" />
+                  </span>
+                </button>
               </div>
             </div>
           </article>
@@ -2742,6 +3328,107 @@ onBeforeUnmount(() => {
             </span>
           </button>
         </div>
+      </section>
+    </div>
+
+    <div class="preview-overlay" v-if="captureJobDetail.open" @click.self="closeCaptureJobDetail">
+      <section class="task-detail-panel">
+        <header>
+          <div>
+            <h3>任务详情</h3>
+            <p>
+              <span class="capture-job__status" :class="`capture-job__status--${captureJobDetailStatus.tone}`">
+                {{ captureJobDetailStatus.label }}
+              </span>
+              <code>{{ captureJobDetail.job?.id || '-' }}</code>
+            </p>
+          </div>
+          <div class="actions">
+            <button class="btn" :disabled="busy.captureJobDetail || busy.captureJobLogs" @click="refreshCaptureJobDetail">
+              <span class="btn__inner">
+                <AppIcon name="refresh" :size="15" />
+                <span>{{ busy.captureJobDetail || busy.captureJobLogs ? '刷新中...' : '刷新详情' }}</span>
+              </span>
+            </button>
+            <button class="btn" @click="closeCaptureJobDetail">
+              <span class="btn__inner">
+                <AppIcon name="x" :size="15" />
+                <span>关闭</span>
+              </span>
+            </button>
+          </div>
+        </header>
+
+        <div class="task-detail__summary" v-if="captureJobDetail.job">
+          <div>
+            <span>公众号</span>
+            <strong>{{ captureJobDetail.job.mp_nickname || captureJobDetail.job.mp_id }}</strong>
+          </div>
+          <div>
+            <span>时间范围</span>
+            <strong>{{ captureJobRangeLabel(captureJobDetail.job) }}</strong>
+          </div>
+          <div>
+            <span>任务进度</span>
+            <strong>{{ captureJobMetricsLabel(captureJobDetail.job) }}</strong>
+          </div>
+          <div>
+            <span>创建/开始/结束</span>
+            <strong>
+              {{ formatDateTime(captureJobDetail.job.created_at) }} / {{ formatDateTime(captureJobDetail.job.started_at) }} /
+              {{ formatDateTime(captureJobDetail.job.finished_at) }}
+            </strong>
+          </div>
+        </div>
+
+        <div class="task-detail__ops" v-if="captureJobDetail.job">
+          <button
+            v-if="isCaptureJobCancelable(captureJobDetail.job)"
+            class="btn btn--danger"
+            :disabled="isCaptureJobActionBusy(captureJobDetail.job.id, 'cancel')"
+            @click="cancelCaptureJob(captureJobDetail.job)"
+          >
+            <span class="btn__inner">
+              <AppIcon name="pause" :size="14" />
+              <span>{{ isCaptureJobActionBusy(captureJobDetail.job.id, 'cancel') ? '取消中...' : '取消任务' }}</span>
+            </span>
+          </button>
+          <button
+            v-if="isCaptureJobRetryable(captureJobDetail.job)"
+            class="btn"
+            :disabled="isCaptureJobActionBusy(captureJobDetail.job.id, 'retry')"
+            @click="retryCaptureJob(captureJobDetail.job)"
+          >
+            <span class="btn__inner">
+              <AppIcon name="rotate-cw" :size="14" />
+              <span>{{ isCaptureJobActionBusy(captureJobDetail.job.id, 'retry') ? '重试中...' : '按原参数重试' }}</span>
+            </span>
+          </button>
+        </div>
+
+        <p class="task-detail__error" v-if="captureJobDetail.job?.error">{{ captureJobDetail.job.error }}</p>
+
+        <section class="task-detail__logs">
+          <div class="task-detail__logs-head">
+            <h4>任务日志</h4>
+            <span>共 {{ captureJobDetail.logTotal }} 条</span>
+          </div>
+
+          <p class="task-detail__loading" v-if="busy.captureJobLogs">日志加载中...</p>
+
+          <div class="task-log-list" v-else-if="captureJobDetail.logs.length">
+            <article class="task-log" v-for="item in captureJobDetail.logs" :key="`task-log-${item.id}`">
+              <div class="task-log__head">
+                <span class="task-log__time">{{ formatDateTime(item.created_at) }}</span>
+                <span class="task-log__level" :class="captureJobLogLevelClass(item.level)">{{ item.level || 'info' }}</span>
+              </div>
+              <p class="task-log__message">{{ item.message }}</p>
+              <pre v-if="formatCaptureJobLogPayload(item.payload)">{{ formatCaptureJobLogPayload(item.payload) }}</pre>
+            </article>
+          </div>
+
+          <p class="empty" v-else>暂无日志记录。</p>
+        </section>
       </section>
     </div>
 

@@ -225,6 +225,7 @@ class ArticleService:
         start_ts: int | None = None,
         end_ts: int | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         created_count = 0
         updated_count = 0
@@ -264,6 +265,15 @@ class ArticleService:
         seen_keys: set[str] = set()
         reached_target = False
         reached_range_start = False
+        cancelled = False
+
+        def should_stop_now() -> bool:
+            if not should_stop:
+                return False
+            try:
+                return bool(should_stop())
+            except Exception:
+                return False
 
         def emit_progress() -> None:
             if not progress_callback:
@@ -287,6 +297,10 @@ class ArticleService:
                 return
 
         for page_index in range(max_pages):
+            if should_stop_now():
+                cancelled = True
+                break
+
             scanned_pages = page_index + 1
             begin = page_index * 5
 
@@ -304,6 +318,10 @@ class ArticleService:
                 break
 
             for item in records:
+                if should_stop_now():
+                    cancelled = True
+                    break
+
                 item_publish_ts = self._safe_int(
                     item.get("update_time") or item.get("create_time")
                 )
@@ -366,6 +384,9 @@ class ArticleService:
             db.commit()
             emit_progress()
 
+            if cancelled:
+                break
+
             if reached_target:
                 break
 
@@ -391,6 +412,7 @@ class ArticleService:
             "duplicates_skipped": duplicates_skipped,
             "start_ts": range_start_ts,
             "end_ts": range_end_ts,
+            "cancelled": cancelled,
         }
 
     def fetch_article_detail(self, db: Session, article_url: str) -> dict[str, Any]:

@@ -128,9 +128,56 @@ def create_sync_job(mp_id: str, payload: MPSyncRequest, db: Session = Depends(ge
 def list_sync_jobs(
     offset: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
+    status: str = Query("", description="任务状态过滤"),
+    mp_id: str = Query("", description="按公众号 ID 过滤"),
+    keyword: str = Query("", description="按任务 ID/公众号名/错误关键词过滤"),
     db: Session = Depends(get_db),
 ):
-    rows, total = capture_job_service.list_jobs(db, offset=offset, limit=limit)
+    rows, total = capture_job_service.list_jobs(
+        db,
+        offset=offset,
+        limit=limit,
+        status=status,
+        mp_id=mp_id,
+        keyword=keyword,
+    )
+    return ApiResponse(
+        data={
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "status": status,
+            "mp_id": mp_id,
+            "keyword": keyword,
+            "list": rows,
+        }
+    )
+
+
+@router.get("/sync/jobs/{job_id}", response_model=ApiResponse)
+def get_sync_job(job_id: str, db: Session = Depends(get_db)):
+    job = capture_job_service.get_job(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="抓取任务不存在")
+    return ApiResponse(data=job)
+
+
+@router.get("/sync/jobs/{job_id}/logs", response_model=ApiResponse)
+def list_sync_job_logs(
+    job_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    result = capture_job_service.list_job_logs(
+        db,
+        job_id=job_id,
+        offset=offset,
+        limit=limit,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="抓取任务不存在")
+    rows, total = result
     return ApiResponse(
         data={
             "total": total,
@@ -141,9 +188,30 @@ def list_sync_jobs(
     )
 
 
-@router.get("/sync/jobs/{job_id}", response_model=ApiResponse)
-def get_sync_job(job_id: str, db: Session = Depends(get_db)):
-    job = capture_job_service.get_job(db, job_id)
+@router.post("/sync/jobs/{job_id}/cancel", response_model=ApiResponse)
+def cancel_sync_job(job_id: str, db: Session = Depends(get_db)):
+    try:
+        job = capture_job_service.cancel_job(db, job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if not job:
+        raise HTTPException(status_code=404, detail="抓取任务不存在")
+    return ApiResponse(data=job)
+
+
+@router.post("/sync/jobs/{job_id}/retry", response_model=ApiResponse)
+def retry_sync_job(job_id: str, db: Session = Depends(get_db)):
+    try:
+        wechat_client.ensure_login(db)
+        job = capture_job_service.retry_job(db, job_id)
+    except WeChatAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"重试任务失败: {exc}") from exc
+
     if not job:
         raise HTTPException(status_code=404, detail="抓取任务不存在")
     return ApiResponse(data=job)

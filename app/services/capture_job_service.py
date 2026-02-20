@@ -4,11 +4,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import desc
+from sqlalchemy import desc, or_
 from sqlalchemy.orm import Session
 
 from app.core.db import SessionLocal
-from app.models import CaptureJob, MPAccount
+from app.models import CaptureJob, CaptureJobLog, MPAccount
 from app.services.article_service import article_service
 
 
@@ -19,6 +19,8 @@ def utcnow() -> datetime:
 class CaptureJobService:
     ACTIVE_STATUSES = ("queued", "running")
     RANGE_CAPTURE_PAGE_LIMIT = 300
+    TERMINAL_STATUSES = ("success", "failed", "canceled")
+    CANCEL_MESSAGE = "用户取消任务"
 
     def __init__(self) -> None:
         self._worker_lock = threading.Lock()
@@ -56,6 +58,12 @@ class CaptureJobService:
                 row.error = "任务进程已中断，请重新发起抓取"
             if not row.finished_at:
                 row.finished_at = utcnow()
+            self._append_log(
+                db,
+                row.id,
+                level="error",
+                message="任务进程已中断，已自动标记失败",
+            )
             db.add(row)
             changed = True
 
@@ -77,6 +85,47 @@ class CaptureJobService:
         except json.JSONDecodeError:
             return {}
         return {}
+
+    @staticmethod
+    def _payload_dict(value: str | None) -> dict[str, Any] | None:
+        if not value:
+            return None
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            return None
+        return None
+
+    def serialize_log(self, row: CaptureJobLog) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "job_id": row.job_id,
+            "level": row.level,
+            "message": row.message,
+            "payload": self._payload_dict(row.payload_json),
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+
+    def _append_log(
+        self,
+        db: Session,
+        job_id: str,
+        message: str,
+        level: str = "info",
+        payload: dict[str, Any] | None = None,
+    ) -> CaptureJobLog:
+        row = CaptureJobLog(
+            job_id=job_id,
+            level=level,
+            message=message,
+            payload_json=json.dumps(payload, ensure_ascii=False)
+            if payload is not None
+            else None,
+        )
+        db.add(row)
+        return row
 
     def serialize_job(self, job: CaptureJob) -> dict[str, Any]:
         return {
@@ -106,9 +155,29 @@ class CaptureJobService:
         db: Session,
         offset: int = 0,
         limit: int = 20,
+        status: str = "",
+        mp_id: str = "",
+        keyword: str = "",
     ) -> tuple[list[dict[str, Any]], int]:
         self._reconcile_active_jobs(db)
         query = db.query(CaptureJob)
+
+        if status.strip():
+            query = query.filter(CaptureJob.status == status.strip())
+
+        if mp_id.strip():
+            query = query.filter(CaptureJob.mp_id == mp_id.strip())
+
+        if keyword.strip():
+            term = f"%{keyword.strip()}%"
+            query = query.filter(
+                or_(
+                    CaptureJob.mp_nickname.ilike(term),
+                    CaptureJob.id.ilike(term),
+                    CaptureJob.error.ilike(term),
+                )
+            )
+
         total = query.count()
         rows = (
             query.order_by(desc(CaptureJob.created_at))
@@ -124,6 +193,29 @@ class CaptureJobService:
         if not row:
             return None
         return self.serialize_job(row)
+
+    def list_job_logs(
+        self,
+        db: Session,
+        job_id: str,
+        offset: int = 0,
+        limit: int = 200,
+    ) -> tuple[list[dict[str, Any]], int] | None:
+        self._reconcile_active_jobs(db)
+        job = self._get_job_row(db, job_id)
+        if not job:
+            return None
+
+        query = db.query(CaptureJobLog).filter(CaptureJobLog.job_id == job_id)
+        total = query.count()
+        rows = (
+            query.order_by(desc(CaptureJobLog.created_at), desc(CaptureJobLog.id))
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        rows.reverse()
+        return [self.serialize_log(row) for row in rows], total
 
     def _get_job_row(self, db: Session, job_id: str) -> CaptureJob | None:
         return db.query(CaptureJob).filter(CaptureJob.id == job_id).first()
@@ -170,6 +262,16 @@ class CaptureJobService:
             fetch_content=True,
         )
         db.add(job)
+        self._append_log(
+            db,
+            job.id,
+            message="任务已创建，等待执行",
+            payload={
+                "start_ts": start,
+                "end_ts": end,
+                "max_pages": self.RANGE_CAPTURE_PAGE_LIMIT,
+            },
+        )
         db.commit()
         db.refresh(job)
         try:
@@ -188,6 +290,72 @@ class CaptureJobService:
 
         return self.serialize_job(job)
 
+    def cancel_job(self, db: Session, job_id: str) -> dict[str, Any] | None:
+        self._reconcile_active_jobs(db)
+        job = self._get_job_row(db, job_id)
+        if not job:
+            return None
+
+        if job.status in self.TERMINAL_STATUSES:
+            raise ValueError("任务已结束，无法取消")
+
+        if job.status == "queued":
+            job.status = "canceled"
+            job.error = self.CANCEL_MESSAGE
+            job.finished_at = utcnow()
+            self._append_log(
+                db,
+                job.id,
+                level="warn",
+                message="任务在排队阶段被取消",
+            )
+            self._mark_job_inactive(job.id)
+        else:
+            job.status = "canceled"
+            job.error = "收到取消请求，等待当前步骤安全退出"
+            self._append_log(
+                db,
+                job.id,
+                level="warn",
+                message="收到取消请求，正在停止任务",
+            )
+
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        return self.serialize_job(job)
+
+    def retry_job(self, db: Session, job_id: str) -> dict[str, Any] | None:
+        self._reconcile_active_jobs(db)
+        source = self._get_job_row(db, job_id)
+        if not source:
+            return None
+
+        if source.status in self.ACTIVE_STATUSES:
+            raise ValueError("任务仍在执行中，无法重试")
+
+        if source.start_ts is None or source.end_ts is None:
+            raise ValueError("该任务缺少时间范围，无法重试")
+
+        mp = db.query(MPAccount).filter(MPAccount.id == source.mp_id).first()
+        if not mp:
+            raise ValueError("任务对应公众号不存在，无法重试")
+
+        self._append_log(
+            db,
+            source.id,
+            message="已发起重试任务",
+            payload={"mp_id": source.mp_id},
+        )
+        db.commit()
+
+        return self.create_job(
+            db,
+            mp=mp,
+            start_ts=int(source.start_ts),
+            end_ts=int(source.end_ts),
+        )
+
     def _run_job(self, job_id: str) -> None:
         with self._worker_lock:
             db = SessionLocal()
@@ -196,9 +364,37 @@ class CaptureJobService:
                 if not job:
                     return
 
+                if job.status == "canceled":
+                    if not job.error:
+                        job.error = self.CANCEL_MESSAGE
+                    if not job.finished_at:
+                        job.finished_at = utcnow()
+                    self._append_log(
+                        db,
+                        job.id,
+                        level="warn",
+                        message="任务已取消，未进入执行阶段",
+                    )
+                    db.add(job)
+                    db.commit()
+                    return
+
+                if job.status != "queued":
+                    return
+
                 job.status = "running"
                 job.started_at = utcnow()
                 job.error = None
+                self._append_log(
+                    db,
+                    job.id,
+                    message="任务开始执行",
+                    payload={
+                        "start_ts": job.start_ts,
+                        "end_ts": job.end_ts,
+                        "max_pages": job.pages_hint,
+                    },
+                )
                 db.add(job)
                 db.commit()
                 db.refresh(job)
@@ -206,6 +402,12 @@ class CaptureJobService:
                 mp = db.query(MPAccount).filter(MPAccount.id == job.mp_id).first()
                 if not mp:
                     raise RuntimeError("抓取目标公众号不存在")
+
+                last_logged_progress = {"page": 0}
+
+                def should_stop() -> bool:
+                    live_job = self._get_job_row(db, job_id)
+                    return bool(live_job and live_job.status == "canceled")
 
                 def on_progress(progress: dict[str, Any]) -> None:
                     live_job = self._get_job_row(db, job_id)
@@ -225,6 +427,22 @@ class CaptureJobService:
                     live_job.reached_target = bool(
                         progress.get("reached_target", False)
                     )
+
+                    current_page = int(progress.get("scanned_pages", 0) or 0)
+                    if current_page > last_logged_progress["page"]:
+                        last_logged_progress["page"] = current_page
+                        self._append_log(
+                            db,
+                            live_job.id,
+                            message=f"扫描进度更新：第 {current_page} 页",
+                            payload={
+                                "created": live_job.created_count,
+                                "updated": live_job.updated_count,
+                                "duplicates_skipped": live_job.duplicates_skipped,
+                                "max_pages": live_job.max_pages,
+                            },
+                        )
+
                     db.add(live_job)
                     db.commit()
 
@@ -236,13 +454,13 @@ class CaptureJobService:
                     start_ts=job.start_ts,
                     end_ts=job.end_ts,
                     progress_callback=on_progress,
+                    should_stop=should_stop,
                 )
 
                 done_job = self._get_job_row(db, job_id)
                 if not done_job:
                     return
 
-                done_job.status = "success"
                 done_job.created_count = int(result.get("created", 0) or 0)
                 done_job.updated_count = int(result.get("updated", 0) or 0)
                 done_job.content_updated_count = int(
@@ -254,18 +472,60 @@ class CaptureJobService:
                 done_job.scanned_pages = int(result.get("scanned_pages", 0) or 0)
                 done_job.max_pages = int(result.get("max_pages", 0) or 0)
                 done_job.reached_target = bool(result.get("reached_target", False))
-                done_job.error = None
                 done_job.result_json = json.dumps(result, ensure_ascii=False)
                 done_job.finished_at = utcnow()
+
+                if bool(result.get("cancelled")) or done_job.status == "canceled":
+                    done_job.status = "canceled"
+                    done_job.error = done_job.error or self.CANCEL_MESSAGE
+                    self._append_log(
+                        db,
+                        done_job.id,
+                        level="warn",
+                        message="任务已取消",
+                        payload={
+                            "created": done_job.created_count,
+                            "updated": done_job.updated_count,
+                            "duplicates_skipped": done_job.duplicates_skipped,
+                            "scanned_pages": done_job.scanned_pages,
+                        },
+                    )
+                else:
+                    done_job.status = "success"
+                    done_job.error = None
+                    self._append_log(
+                        db,
+                        done_job.id,
+                        message="任务执行完成",
+                        payload={
+                            "created": done_job.created_count,
+                            "updated": done_job.updated_count,
+                            "duplicates_skipped": done_job.duplicates_skipped,
+                            "scanned_pages": done_job.scanned_pages,
+                        },
+                    )
+
                 db.add(done_job)
                 db.commit()
             except Exception as exc:  # noqa: BLE001
                 db.rollback()
                 failed_job = self._get_job_row(db, job_id)
                 if failed_job:
-                    failed_job.status = "failed"
-                    failed_job.error = str(exc)
+                    if failed_job.status == "canceled":
+                        failed_job.error = failed_job.error or self.CANCEL_MESSAGE
+                    else:
+                        failed_job.status = "failed"
+                        failed_job.error = str(exc)
                     failed_job.finished_at = utcnow()
+                    self._append_log(
+                        db,
+                        failed_job.id,
+                        level="error" if failed_job.status == "failed" else "warn",
+                        message="任务执行失败"
+                        if failed_job.status == "failed"
+                        else "任务已取消",
+                        payload={"error": str(exc)},
+                    )
                     db.add(failed_job)
                     db.commit()
             finally:
