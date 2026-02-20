@@ -102,7 +102,7 @@ COLUMN_COMMENTS: dict[str, dict[str, str]] = {
         "id": "抓取任务 ID",
         "mp_id": "公众号 ID",
         "mp_nickname": "公众号名称快照",
-        "status": "任务状态（queued/running/success/failed/canceled）",
+        "status": "任务状态（queued/running/canceling/success/failed/canceled）",
         "pages_hint": "内部扫描页上限",
         "requested_count": "历史字段（已不作为抓取入参）",
         "start_ts": "时间范围起始（秒级时间戳）",

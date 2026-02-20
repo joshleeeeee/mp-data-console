@@ -17,7 +17,7 @@ def utcnow() -> datetime:
 
 
 class CaptureJobService:
-    ACTIVE_STATUSES = ("queued", "running")
+    ACTIVE_STATUSES = ("queued", "running", "canceling")
     RANGE_CAPTURE_PAGE_LIMIT = 300
     TERMINAL_STATUSES = ("success", "failed", "canceled")
     CANCEL_MESSAGE = "用户取消任务"
@@ -40,16 +40,42 @@ class CaptureJobService:
             return set(self._active_job_ids)
 
     def _reconcile_active_jobs(self, db: Session) -> None:
+        runtime_active = self._snapshot_active_job_ids()
+        changed = False
+
+        legacy_cancelled_rows = (
+            db.query(CaptureJob)
+            .filter(
+                CaptureJob.status == "canceled",
+                CaptureJob.started_at.is_not(None),
+                CaptureJob.finished_at.is_(None),
+            )
+            .all()
+        )
+        for row in legacy_cancelled_rows:
+            if row.id in runtime_active:
+                row.status = "canceling"
+                row.error = row.error or "收到取消请求，等待当前步骤安全退出"
+                self._append_log(
+                    db,
+                    row.id,
+                    level="warn",
+                    message="检测到历史取消中任务，状态已修正为 canceling",
+                )
+            else:
+                row.error = row.error or self.CANCEL_MESSAGE
+                row.finished_at = row.finished_at or utcnow()
+            db.add(row)
+            changed = True
+
         rows = (
             db.query(CaptureJob)
             .filter(CaptureJob.status.in_(self.ACTIVE_STATUSES))
             .all()
         )
-        if not rows:
+        if not rows and not changed:
             return
 
-        runtime_active = self._snapshot_active_job_ids()
-        changed = False
         for row in rows:
             if row.id in runtime_active:
                 continue
@@ -242,6 +268,9 @@ class CaptureJobService:
                 f"已有抓取任务在执行（{active_job.id}），请等待当前任务完成后再发起新任务"
             )
 
+        if self._worker_lock.locked():
+            raise ValueError("抓取任务执行器仍在收尾，请稍后再试")
+
         if start_ts is None or end_ts is None:
             raise ValueError("必须指定抓取时间范围")
 
@@ -310,8 +339,8 @@ class CaptureJobService:
                 message="任务在排队阶段被取消",
             )
             self._mark_job_inactive(job.id)
-        else:
-            job.status = "canceled"
+        elif job.status == "running":
+            job.status = "canceling"
             job.error = "收到取消请求，等待当前步骤安全退出"
             self._append_log(
                 db,
@@ -319,6 +348,8 @@ class CaptureJobService:
                 level="warn",
                 message="收到取消请求，正在停止任务",
             )
+        else:
+            job.error = job.error or "收到取消请求，等待当前步骤安全退出"
 
         db.add(job)
         db.commit()
@@ -407,7 +438,9 @@ class CaptureJobService:
 
                 def should_stop() -> bool:
                     live_job = self._get_job_row(db, job_id)
-                    return bool(live_job and live_job.status == "canceled")
+                    return bool(
+                        live_job and live_job.status in ("canceling", "canceled")
+                    )
 
                 def on_progress(progress: dict[str, Any]) -> None:
                     live_job = self._get_job_row(db, job_id)
@@ -475,7 +508,10 @@ class CaptureJobService:
                 done_job.result_json = json.dumps(result, ensure_ascii=False)
                 done_job.finished_at = utcnow()
 
-                if bool(result.get("cancelled")) or done_job.status == "canceled":
+                if bool(result.get("cancelled")) or done_job.status in (
+                    "canceling",
+                    "canceled",
+                ):
                     done_job.status = "canceled"
                     done_job.error = done_job.error or self.CANCEL_MESSAGE
                     self._append_log(
@@ -511,7 +547,8 @@ class CaptureJobService:
                 db.rollback()
                 failed_job = self._get_job_row(db, job_id)
                 if failed_job:
-                    if failed_job.status == "canceled":
+                    if failed_job.status in ("canceling", "canceled"):
+                        failed_job.status = "canceled"
                         failed_job.error = failed_job.error or self.CANCEL_MESSAGE
                     else:
                         failed_job.status = "failed"
