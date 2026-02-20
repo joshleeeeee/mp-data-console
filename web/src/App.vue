@@ -41,6 +41,7 @@ const busy = reactive({
   preview: false,
   dbTables: false,
   dbRows: false,
+  dbWrite: false,
   mcp: false,
   mcpWrite: false,
 })
@@ -89,6 +90,8 @@ const dbView = reactive({
   table: '',
   tableComment: '',
   columns: [],
+  columnDefs: [],
+  primaryKeys: [],
   columnComments: {},
   rows: [],
   total: 0,
@@ -100,6 +103,17 @@ const dbView = reactive({
 })
 
 const dbLimitOptions = [20, 50, 100, 200]
+const articleLimitOptions = [12, 24, 48, 96]
+const articleLimitStorageKey = 'wemp.console.article.limit'
+
+const selectedDbRowKeys = ref([])
+
+const dbEditor = reactive({
+  open: false,
+  mode: 'create',
+  payload: '',
+  pk: {},
+})
 
 const mcp = reactive({
   server_name: '',
@@ -217,6 +231,89 @@ const dbRangeText = computed(() => {
   return `${start}-${end} / ${dbView.total}`
 })
 
+const dbSelectableRows = computed(() => dbView.rows.filter((row) => Boolean(extractDbPrimaryKey(row))))
+
+const selectedDbPkList = computed(() => {
+  return dbView.rows
+    .filter((row) => isDbRowSelected(row))
+    .map((row) => extractDbPrimaryKey(row))
+    .filter((pk) => Boolean(pk))
+})
+
+const selectedDbCount = computed(() => selectedDbPkList.value.length)
+
+const isDbAllSelected = computed(() => {
+  if (!dbSelectableRows.value.length) {
+    return false
+  }
+  return dbSelectableRows.value.every((row) => isDbRowSelected(row))
+})
+
+const dbPrimaryKeyText = computed(() => {
+  if (!dbView.primaryKeys.length) {
+    return '无（只读）'
+  }
+  return dbView.primaryKeys.join(', ')
+})
+
+const dbEditorTitle = computed(() => (dbEditor.mode === 'create' ? '新增记录' : '编辑记录'))
+
+const articlePageCount = computed(() => {
+  const limit = Math.max(1, Number(articleFilter.limit) || 12)
+  const total = Math.max(0, Number(articleTotal.value) || 0)
+  return Math.max(1, Math.ceil(total / limit))
+})
+
+const articleCurrentPage = computed(() => {
+  const limit = Math.max(1, Number(articleFilter.limit) || 12)
+  return Math.floor(Math.max(0, articleFilter.offset) / limit) + 1
+})
+
+const articleRangeText = computed(() => {
+  const total = Math.max(0, Number(articleTotal.value) || 0)
+  if (total <= 0) {
+    return '0 / 0'
+  }
+  const start = articleFilter.offset + 1
+  const end = Math.min(articleFilter.offset + articleFilter.limit, total)
+  return `${start}-${end} / ${total}`
+})
+
+const articlePageItems = computed(() => {
+  const total = articlePageCount.value
+  const current = articleCurrentPage.value
+
+  if (total <= 7) {
+    return Array.from({ length: total }, (_, idx) => idx + 1)
+  }
+
+  const pages = new Set([1, total, current - 1, current, current + 1])
+
+  if (current <= 3) {
+    pages.add(2)
+    pages.add(3)
+    pages.add(4)
+  }
+
+  if (current >= total - 2) {
+    pages.add(total - 1)
+    pages.add(total - 2)
+    pages.add(total - 3)
+  }
+
+  const sorted = [...pages].filter((page) => page >= 1 && page <= total).sort((a, b) => a - b)
+  const items = []
+
+  for (let index = 0; index < sorted.length; index += 1) {
+    if (index > 0 && sorted[index] - sorted[index - 1] > 1) {
+      items.push('...')
+    }
+    items.push(sorted[index])
+  }
+
+  return items
+})
+
 const qrPlaceholder =
   'https://images.unsplash.com/photo-1563986768609-322da13575f3?auto=format&fit=crop&w=720&q=60'
 const wechatImageHostPattern = /(?:qpic\.cn|qlogo\.cn|weixin\.qq\.com|wx\.qlogo\.cn)/i
@@ -238,6 +335,31 @@ function setNotice(type, text, timeout = 3600) {
       notice.text = ''
     }, timeout)
   }
+}
+
+function normalizeArticleLimit(rawValue) {
+  const parsed = Math.floor(Number(rawValue))
+  if (articleLimitOptions.includes(parsed)) {
+    return parsed
+  }
+  return articleLimitOptions[0]
+}
+
+function loadArticleLimitPreference() {
+  try {
+    const saved = localStorage.getItem(articleLimitStorageKey)
+    if (saved !== null) {
+      articleFilter.limit = normalizeArticleLimit(saved)
+    }
+  } catch {
+    articleFilter.limit = normalizeArticleLimit(articleFilter.limit)
+  }
+}
+
+function saveArticleLimitPreference() {
+  try {
+    localStorage.setItem(articleLimitStorageKey, String(articleFilter.limit))
+  } catch {}
 }
 
 function applySession(data = {}) {
@@ -806,11 +928,56 @@ async function loadArticles() {
     const data = await api(`/articles?${query.toString()}`)
     articles.value = data.list || []
     articleTotal.value = data.total || 0
+
+    if (!articles.value.length && articleTotal.value > 0 && articleFilter.offset > 0) {
+      const maxOffset = Math.max(0, (Math.ceil(articleTotal.value / articleFilter.limit) - 1) * articleFilter.limit)
+      if (maxOffset !== articleFilter.offset) {
+        articleFilter.offset = maxOffset
+        await loadArticles()
+      }
+    }
   } catch (err) {
     setNotice('error', err.message || '加载文章失败')
   } finally {
     busy.articles = false
   }
+}
+
+function applyArticleFilters() {
+  if (busy.articles) {
+    return
+  }
+  articleFilter.offset = 0
+  loadArticles()
+}
+
+function goToArticlePage(page) {
+  if (busy.articles) {
+    return
+  }
+  const target = Math.min(articlePageCount.value, Math.max(1, Number(page) || 1))
+  const nextOffset = (target - 1) * articleFilter.limit
+
+  if (nextOffset === articleFilter.offset) {
+    return
+  }
+
+  articleFilter.offset = nextOffset
+  loadArticles()
+}
+
+function changeArticlePage(step) {
+  goToArticlePage(articleCurrentPage.value + step)
+}
+
+function changeArticlePageSize() {
+  if (busy.articles) {
+    return
+  }
+  articleFilter.limit = normalizeArticleLimit(articleFilter.limit)
+  saveArticleLimitPreference()
+  articleFilter.offset = 0
+  loadArticles()
 }
 
 async function openArticlePreview(article) {
@@ -928,11 +1095,14 @@ async function loadDbRows() {
     const data = await api(`/ops/db/table/${encodeURIComponent(dbView.table)}?${query.toString()}`)
     dbView.tableComment = data.table_comment || ''
     dbView.columns = data.columns || []
+    dbView.columnDefs = data.column_defs || []
+    dbView.primaryKeys = data.primary_keys || []
     dbView.columnComments = data.column_comments || {}
     dbView.rows = data.rows || []
     dbView.total = data.total || 0
     dbView.searchColumns = data.search_columns || dbView.searchColumns
     dbView.exactFiltersText = formatExactFilters(data.exact_filters)
+    selectedDbRowKeys.value = []
   } catch (err) {
     setNotice('error', err.message || '读取表数据失败')
   } finally {
@@ -943,6 +1113,7 @@ async function loadDbRows() {
 async function refreshDb() {
   await loadDbTables()
   dbView.offset = 0
+  selectedDbRowKeys.value = []
   await loadDbRows()
 }
 
@@ -951,6 +1122,7 @@ function switchDbTable() {
   dbView.keyword = ''
   dbView.searchColumns = []
   dbView.exactFiltersText = ''
+  selectedDbRowKeys.value = []
   loadDbRows()
 }
 
@@ -965,6 +1137,7 @@ function toggleDbSearchColumn(column) {
 
 function applyDbFilters() {
   dbView.offset = 0
+  selectedDbRowKeys.value = []
   loadDbRows()
 }
 
@@ -973,11 +1146,13 @@ function clearDbFilters() {
   dbView.keyword = ''
   dbView.searchColumns = []
   dbView.exactFiltersText = ''
+  selectedDbRowKeys.value = []
   loadDbRows()
 }
 
 function changeDbLimit() {
   dbView.offset = 0
+  selectedDbRowKeys.value = []
   loadDbRows()
 }
 
@@ -997,7 +1172,215 @@ function changeDbPage(step) {
     return
   }
   dbView.offset = nextOffset
+  selectedDbRowKeys.value = []
   loadDbRows()
+}
+
+function extractDbPrimaryKey(row) {
+  if (!row || !dbView.primaryKeys.length) {
+    return null
+  }
+
+  const pk = {}
+  for (const key of dbView.primaryKeys) {
+    if (!(key in row)) {
+      return null
+    }
+    pk[key] = row[key]
+  }
+  return pk
+}
+
+function buildDbSelectionKeyFromPk(pk) {
+  if (!pk) {
+    return ''
+  }
+  return JSON.stringify(dbView.primaryKeys.map((key) => [key, pk[key] ?? null]))
+}
+
+function buildDbRowSelectionKey(row) {
+  return buildDbSelectionKeyFromPk(extractDbPrimaryKey(row))
+}
+
+function isDbRowSelected(row) {
+  const key = buildDbRowSelectionKey(row)
+  if (!key) {
+    return false
+  }
+  return selectedDbRowKeys.value.includes(key)
+}
+
+function canEditDbRow(row) {
+  return Boolean(dbView.primaryKeys.length && extractDbPrimaryKey(row))
+}
+
+function toggleDbRowSelection(row) {
+  const key = buildDbRowSelectionKey(row)
+  if (!key) {
+    return
+  }
+
+  const index = selectedDbRowKeys.value.indexOf(key)
+  if (index >= 0) {
+    selectedDbRowKeys.value.splice(index, 1)
+    return
+  }
+  selectedDbRowKeys.value.push(key)
+}
+
+function toggleAllDbRows(checked) {
+  if (!checked) {
+    selectedDbRowKeys.value = []
+    return
+  }
+
+  selectedDbRowKeys.value = dbSelectableRows.value
+    .map((row) => buildDbRowSelectionKey(row))
+    .filter((key) => Boolean(key))
+}
+
+function buildDbCreateTemplate() {
+  const required = {}
+  for (const column of dbView.columnDefs) {
+    if (column.autoincrement) {
+      continue
+    }
+    if (!column.nullable && !column.has_default) {
+      required[column.name] = null
+    }
+  }
+  return required
+}
+
+function openDbCreateDialog() {
+  if (!dbView.table) {
+    setNotice('warn', '请先选择数据表')
+    return
+  }
+  dbEditor.mode = 'create'
+  dbEditor.pk = {}
+  dbEditor.payload = JSON.stringify(buildDbCreateTemplate(), null, 2)
+  dbEditor.open = true
+}
+
+function openDbEditDialog(row) {
+  if (!row) {
+    setNotice('warn', '当前行不可编辑')
+    return
+  }
+
+  const pk = extractDbPrimaryKey(row)
+  if (!pk) {
+    setNotice('warn', '当前表没有主键，无法编辑')
+    return
+  }
+
+  dbEditor.mode = 'update'
+  dbEditor.pk = pk
+  dbEditor.payload = JSON.stringify(row, null, 2)
+  dbEditor.open = true
+}
+
+function closeDbEditor() {
+  dbEditor.open = false
+}
+
+function parseDbEditorPayload() {
+  try {
+    const parsed = JSON.parse(dbEditor.payload)
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+      throw new Error('请输入 JSON 对象，例如 {"id": "demo"}')
+    }
+    return parsed
+  } catch (err) {
+    setNotice('warn', err.message || 'JSON 格式不正确')
+    return null
+  }
+}
+
+async function submitDbEditor() {
+  if (busy.dbWrite || !dbView.table) {
+    return
+  }
+
+  const values = parseDbEditorPayload()
+  if (!values) {
+    return
+  }
+
+  busy.dbWrite = true
+  try {
+    if (dbEditor.mode === 'create') {
+      await api(`/ops/db/table/${encodeURIComponent(dbView.table)}/row`, {
+        method: 'POST',
+        body: { values },
+      })
+      setNotice('success', '新增记录成功')
+    } else {
+      await api(`/ops/db/table/${encodeURIComponent(dbView.table)}/row`, {
+        method: 'PUT',
+        body: {
+          pk: dbEditor.pk,
+          values,
+        },
+      })
+      setNotice('success', '更新记录成功')
+    }
+
+    dbEditor.open = false
+    selectedDbRowKeys.value = []
+    await loadDbRows()
+    await loadDbTables()
+  } catch (err) {
+    setNotice('error', err.message || '提交失败')
+  } finally {
+    busy.dbWrite = false
+  }
+}
+
+async function deleteSelectedDbRows() {
+  if (busy.dbWrite || !dbView.table) {
+    return
+  }
+
+  const pkList = selectedDbPkList.value
+  if (!pkList.length) {
+    setNotice('warn', '请先勾选要删除的记录')
+    return
+  }
+
+  const confirmed = window.confirm(`确认删除选中的 ${pkList.length} 条记录？`)
+  if (!confirmed) {
+    return
+  }
+
+  busy.dbWrite = true
+  try {
+    let deletedCount = 0
+    for (const pk of pkList) {
+      await api(`/ops/db/table/${encodeURIComponent(dbView.table)}/row`, {
+        method: 'DELETE',
+        body: { pk },
+      })
+      deletedCount += 1
+    }
+
+    setNotice('success', `已删除 ${deletedCount} 条记录`)
+
+    const nextTotal = Math.max(0, dbView.total - deletedCount)
+    const maxOffset = nextTotal > 0 ? Math.floor((nextTotal - 1) / dbView.limit) * dbView.limit : 0
+    if (dbView.offset > maxOffset) {
+      dbView.offset = maxOffset
+    }
+
+    selectedDbRowKeys.value = []
+    await loadDbRows()
+    await loadDbTables()
+  } catch (err) {
+    setNotice('error', err.message || '删除失败')
+  } finally {
+    busy.dbWrite = false
+  }
 }
 
 async function loadMcpConfig() {
@@ -1088,6 +1471,7 @@ async function copyText(text, label = '内容') {
 
 onMounted(async () => {
   busy.boot = true
+  loadArticleLimitPreference()
   await Promise.all([
     loadSession(),
     loadOverview(),
@@ -1173,8 +1557,9 @@ onBeforeUnmount(() => {
       <div v-if="notice.text" class="notice" :class="`notice--${notice.type}`">{{ notice.text }}</div>
 
       <template v-if="activeView === 'capture'">
-        <section class="panel-grid">
-          <article class="panel">
+        <section class="capture-layout">
+          <div class="capture-column">
+            <article class="panel">
             <header class="panel__head">
               <h3 class="title-row"><AppIcon name="qrcode" :size="16" /> 登录账号</h3>
               <div class="actions">
@@ -1223,7 +1608,106 @@ onBeforeUnmount(() => {
             </div>
           </article>
 
-          <article class="panel">
+          <article class="panel panel--saved">
+            <header class="panel__head">
+              <h3 class="title-row"><AppIcon name="users" :size="16" /> 常用公众号与任务进度</h3>
+            </header>
+
+            <div class="saved-stack">
+              <div class="capture-job" v-if="captureJob">
+                <div class="capture-job__head">
+                  <span class="capture-job__status" :class="`capture-job__status--${currentCaptureJobStatus.tone}`">
+                    {{ currentCaptureJobStatus.label }}
+                  </span>
+                  <code>{{ captureJob.id }}</code>
+                </div>
+                <p class="capture-job__meta">{{ captureJobProgressText }}</p>
+                <p class="capture-job__tip" v-if="hasActiveCaptureJob">
+                  后台处理中，可离开当前页面；回来后会自动继续展示最新状态。任务执行时请勿注销账号。
+                </p>
+                <p class="capture-job__tip capture-job__tip--bad" v-if="captureJob.status === 'failed' && captureJob.error">
+                  {{ captureJob.error }}
+                </p>
+                <div class="actions">
+                  <button class="btn" :disabled="busy.captureStatus" @click="refreshCaptureJob(false)">
+                    <span class="btn__inner">
+                      <AppIcon name="refresh" :size="15" />
+                      <span>{{ busy.captureStatus ? '刷新中...' : '刷新任务状态' }}</span>
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="quick-result" v-if="captureResult">
+                <p>
+                  已写入 <strong>{{ captureResult.mp.nickname }}</strong>，目标去重 {{ captureResult.requested_count }} 条，
+                  新增 {{ captureResult.sync.created }}，更新 {{ captureResult.sync.updated }}，
+                  跳过重复 {{ captureResult.sync.duplicates_skipped || 0 }}，
+                  扫描 {{ captureResult.sync.scanned_pages || captureResult.sync.pages }} 页。
+                </p>
+              </div>
+
+              <div class="saved-mps">
+                <div class="saved-mps__head">
+                  <h4>已保存公众号（可一键抓取）</h4>
+                  <span>常用 {{ favoriteMps.length }} / {{ mps.length }}</span>
+                </div>
+
+                <div v-if="mps.length" class="saved-mps__list">
+                  <article
+                    v-for="item in mps"
+                    :key="item.id"
+                    class="saved-mp-card"
+                    :class="{ 'saved-mp-card--favorite': item.is_favorite }"
+                  >
+                    <img
+                      :src="proxiedImageUrl(item.avatar || qrPlaceholder)"
+                      alt="saved mp avatar"
+                      @load="markImageReady(proxiedImageUrl(item.avatar || qrPlaceholder))"
+                      @error="onImageError($event, proxiedImageUrl(item.avatar || qrPlaceholder))"
+                    />
+                    <div class="saved-mp-card__main">
+                      <div class="saved-mp-card__title">
+                        <strong>{{ item.nickname || '未命名公众号' }}</strong>
+                        <span class="saved-mp-card__tag" v-if="item.is_favorite">常用</span>
+                      </div>
+                      <p>{{ item.alias ? `@${item.alias}` : item.fakeid }}</p>
+                      <p class="sub">抓取次数 {{ item.use_count || 0 }} · 最近提交 {{ formatDateTime(item.last_used_at) }}</p>
+                    </div>
+                    <div class="saved-mp-card__actions">
+                      <button
+                        class="btn btn--primary"
+                        :disabled="busy.capture || !canCapture || hasActiveCaptureJob"
+                        @click="captureSavedMp(item)"
+                      >
+                        <span class="btn__inner">
+                          <AppIcon name="rocket" :size="14" />
+                          <span>抓取</span>
+                        </span>
+                      </button>
+                      <button
+                        class="btn"
+                        :disabled="busy.favoriteMp === item.id"
+                        @click="toggleFavoriteMp(item)"
+                      >
+                        <span class="btn__inner">
+                          <AppIcon name="target" :size="14" />
+                          <span>{{ item.is_favorite ? '取消常用' : '设为常用' }}</span>
+                        </span>
+                      </button>
+                    </div>
+                  </article>
+                </div>
+
+                <p v-else class="empty">暂无已保存公众号，先搜索并提交一次抓取任务。</p>
+              </div>
+            </div>
+          </article>
+
+          </div>
+
+          <div class="capture-column">
+            <article class="panel">
             <header class="panel__head">
               <h3 class="title-row"><AppIcon name="target" :size="16" /> 选择公众号与抓取参数</h3>
               <div class="actions">
@@ -1320,101 +1804,13 @@ onBeforeUnmount(() => {
                 任务提交后在服务端后台执行，你可以离开当前页面，稍后回来继续查看结果。
               </p>
             </div>
-
-            <div class="saved-mps">
-              <div class="saved-mps__head">
-                <h4>已保存公众号（可一键抓取）</h4>
-                <span>常用 {{ favoriteMps.length }} / {{ mps.length }}</span>
-              </div>
-
-              <div v-if="mps.length" class="saved-mps__list">
-                <article
-                  v-for="item in mps"
-                  :key="item.id"
-                  class="saved-mp-card"
-                  :class="{ 'saved-mp-card--favorite': item.is_favorite }"
-                >
-                  <img
-                    :src="proxiedImageUrl(item.avatar || qrPlaceholder)"
-                    alt="saved mp avatar"
-                    @load="markImageReady(proxiedImageUrl(item.avatar || qrPlaceholder))"
-                    @error="onImageError($event, proxiedImageUrl(item.avatar || qrPlaceholder))"
-                  />
-                  <div class="saved-mp-card__main">
-                    <div class="saved-mp-card__title">
-                      <strong>{{ item.nickname || '未命名公众号' }}</strong>
-                      <span class="saved-mp-card__tag" v-if="item.is_favorite">常用</span>
-                    </div>
-                    <p>{{ item.alias ? `@${item.alias}` : item.fakeid }}</p>
-                    <p class="sub">抓取次数 {{ item.use_count || 0 }} · 最近提交 {{ formatDateTime(item.last_used_at) }}</p>
-                  </div>
-                  <div class="saved-mp-card__actions">
-                    <button
-                      class="btn btn--primary"
-                      :disabled="busy.capture || !canCapture || hasActiveCaptureJob"
-                      @click="captureSavedMp(item)"
-                    >
-                      <span class="btn__inner">
-                        <AppIcon name="rocket" :size="14" />
-                        <span>抓取</span>
-                      </span>
-                    </button>
-                    <button
-                      class="btn"
-                      :disabled="busy.favoriteMp === item.id"
-                      @click="toggleFavoriteMp(item)"
-                    >
-                      <span class="btn__inner">
-                        <AppIcon name="target" :size="14" />
-                        <span>{{ item.is_favorite ? '取消常用' : '设为常用' }}</span>
-                      </span>
-                    </button>
-                  </div>
-                </article>
-              </div>
-
-              <p v-else class="empty">暂无已保存公众号，先搜索并提交一次抓取任务。</p>
-            </div>
-
-            <div class="capture-job" v-if="captureJob">
-              <div class="capture-job__head">
-                <span class="capture-job__status" :class="`capture-job__status--${currentCaptureJobStatus.tone}`">
-                  {{ currentCaptureJobStatus.label }}
-                </span>
-                <code>{{ captureJob.id }}</code>
-              </div>
-              <p class="capture-job__meta">{{ captureJobProgressText }}</p>
-              <p class="capture-job__tip" v-if="hasActiveCaptureJob">
-                后台处理中，可离开当前页面；回来后会自动继续展示最新状态。任务执行时请勿注销账号。
-              </p>
-              <p class="capture-job__tip capture-job__tip--bad" v-if="captureJob.status === 'failed' && captureJob.error">
-                {{ captureJob.error }}
-              </p>
-              <div class="actions">
-                <button class="btn" :disabled="busy.captureStatus" @click="refreshCaptureJob(false)">
-                  <span class="btn__inner">
-                    <AppIcon name="refresh" :size="15" />
-                    <span>{{ busy.captureStatus ? '刷新中...' : '刷新任务状态' }}</span>
-                  </span>
-                </button>
-              </div>
-            </div>
-
-            <div class="quick-result" v-if="captureResult">
-              <p>
-                已写入 <strong>{{ captureResult.mp.nickname }}</strong>，目标去重 {{ captureResult.requested_count }} 条，
-                新增 {{ captureResult.sync.created }}，更新 {{ captureResult.sync.updated }}，
-                跳过重复 {{ captureResult.sync.duplicates_skipped || 0 }}，
-                扫描 {{ captureResult.sync.scanned_pages || captureResult.sync.pages }} 页。
-              </p>
-            </div>
           </article>
 
-          <article class="panel panel--wide">
+          <article class="panel panel--article">
             <header class="panel__head">
               <h3 class="title-row"><AppIcon name="file-text" :size="16" /> 文章预览与导出</h3>
               <div class="actions">
-                <select v-model="articleFilter.mp_id">
+                <select v-model="articleFilter.mp_id" @change="applyArticleFilters">
                   <option value="">全部公众号</option>
                   <option v-for="item in mps" :key="item.id" :value="item.id">{{ item.nickname }}</option>
                 </select>
@@ -1422,9 +1818,14 @@ onBeforeUnmount(() => {
                   v-model="articleFilter.keyword"
                   type="text"
                   placeholder="标题关键词"
-                  @keyup.enter="loadArticles"
+                  @keyup.enter="applyArticleFilters"
                 />
-                <button class="btn" :disabled="busy.articles" @click="loadArticles">
+                <select v-model.number="articleFilter.limit" @change="changeArticlePageSize">
+                  <option v-for="size in articleLimitOptions" :key="`article-limit-${size}`" :value="size">
+                    每页 {{ size }} 条
+                  </option>
+                </select>
+                <button class="btn" :disabled="busy.articles" @click="applyArticleFilters">
                   <span class="btn__inner">
                     <AppIcon name="refresh" :size="15" />
                     <span>刷新列表</span>
@@ -1433,58 +1834,97 @@ onBeforeUnmount(() => {
               </div>
             </header>
 
-            <div v-if="busy.articles" class="article-skeleton-list">
-              <div class="article-skeleton" v-for="n in 4" :key="n"></div>
+            <div class="article-scroll">
+              <div v-if="busy.articles" class="article-skeleton-list">
+                <div class="article-skeleton" v-for="n in 4" :key="n"></div>
+              </div>
+
+              <div v-else-if="articles.length" class="article-list">
+                <article class="article-row" v-for="item in articles" :key="item.id">
+                  <div
+                    class="article-cover"
+                    :class="{ 'article-cover--ready': isImageReady(proxiedImageUrl(item.cover_url || qrPlaceholder)) }"
+                  >
+                    <img
+                      :src="proxiedImageUrl(item.cover_url || qrPlaceholder)"
+                      alt="cover"
+                      loading="lazy"
+                      @load="markImageReady(proxiedImageUrl(item.cover_url || qrPlaceholder))"
+                      @error="onImageError($event, proxiedImageUrl(item.cover_url || qrPlaceholder))"
+                    />
+                  </div>
+                  <div class="article-main">
+                    <h3>{{ item.title }}</h3>
+                    <p>
+                      {{ item.author || '未知作者' }} · {{ new Date(item.updated_at).toLocaleString('zh-CN') }} ·
+                      图片 {{ imageCount(item) }}
+                    </p>
+                    <a :href="item.url" target="_blank" rel="noreferrer">查看原文</a>
+                  </div>
+                  <div class="article-actions">
+                    <button class="btn" :disabled="busy.preview" @click="openArticlePreview(item)">
+                      <span class="btn__inner">
+                        <AppIcon name="eye" :size="15" />
+                        <span>预览正文</span>
+                      </span>
+                    </button>
+                    <button class="btn" :disabled="busy.refreshArticle === item.id" @click="refreshArticle(item)">
+                      <span class="btn__inner">
+                        <AppIcon name="rotate-cw" :size="15" />
+                        <span>{{ busy.refreshArticle === item.id ? '刷新中...' : '刷新正文' }}</span>
+                      </span>
+                    </button>
+                    <button class="btn btn--primary" :disabled="busy.exportArticle === `${item.id}:pdf`" @click="exportArticle(item, 'pdf')">
+                      <span class="btn__inner">
+                        <AppIcon name="download" :size="15" />
+                        <span>{{ busy.exportArticle === `${item.id}:pdf` ? '导出中...' : '导出 PDF' }}</span>
+                      </span>
+                    </button>
+                  </div>
+                </article>
+              </div>
+
+              <p v-else class="empty">暂无文章，请先完成抓取。</p>
             </div>
 
-            <div v-else-if="articles.length" class="article-list">
-              <article class="article-row" v-for="item in articles" :key="item.id">
-                <div
-                  class="article-cover"
-                  :class="{ 'article-cover--ready': isImageReady(proxiedImageUrl(item.cover_url || qrPlaceholder)) }"
-                >
-                  <img
-                    :src="proxiedImageUrl(item.cover_url || qrPlaceholder)"
-                    alt="cover"
-                    loading="lazy"
-                    @load="markImageReady(proxiedImageUrl(item.cover_url || qrPlaceholder))"
-                    @error="onImageError($event, proxiedImageUrl(item.cover_url || qrPlaceholder))"
-                  />
-                </div>
-                <div class="article-main">
-                  <h3>{{ item.title }}</h3>
-                  <p>
-                    {{ item.author || '未知作者' }} · {{ new Date(item.updated_at).toLocaleString('zh-CN') }} ·
-                    图片 {{ imageCount(item) }}
-                  </p>
-                  <a :href="item.url" target="_blank" rel="noreferrer">查看原文</a>
-                </div>
-                <div class="article-actions">
-                  <button class="btn" :disabled="busy.preview" @click="openArticlePreview(item)">
-                    <span class="btn__inner">
-                      <AppIcon name="eye" :size="15" />
-                      <span>预览正文</span>
-                    </span>
+            <div class="article-pager" v-if="articleTotal > articleFilter.limit">
+              <button class="btn" :disabled="busy.articles || articleCurrentPage <= 1" @click="changeArticlePage(-1)">
+                <span class="btn__inner">
+                  <AppIcon name="arrow-left" :size="14" />
+                  <span>上一页</span>
+                </span>
+              </button>
+
+              <div class="article-pager__numbers">
+                <template v-for="(item, idx) in articlePageItems" :key="`article-page-${idx}-${item}`">
+                  <span v-if="item === '...'" class="article-pager__ellipsis">...</span>
+                  <button
+                    v-else
+                    class="article-page-btn"
+                    :class="{ 'article-page-btn--active': item === articleCurrentPage }"
+                    :disabled="busy.articles"
+                    @click="goToArticlePage(item)"
+                  >
+                    {{ item }}
                   </button>
-                  <button class="btn" :disabled="busy.refreshArticle === item.id" @click="refreshArticle(item)">
-                    <span class="btn__inner">
-                      <AppIcon name="rotate-cw" :size="15" />
-                      <span>{{ busy.refreshArticle === item.id ? '刷新中...' : '刷新正文' }}</span>
-                    </span>
-                  </button>
-                  <button class="btn btn--primary" :disabled="busy.exportArticle === `${item.id}:pdf`" @click="exportArticle(item, 'pdf')">
-                    <span class="btn__inner">
-                      <AppIcon name="download" :size="15" />
-                      <span>{{ busy.exportArticle === `${item.id}:pdf` ? '导出中...' : '导出 PDF' }}</span>
-                    </span>
-                  </button>
-                </div>
-              </article>
+                </template>
+              </div>
+
+              <button
+                class="btn"
+                :disabled="busy.articles || articleCurrentPage >= articlePageCount"
+                @click="changeArticlePage(1)"
+              >
+                <span class="btn__inner">
+                  <span>下一页</span>
+                  <AppIcon name="arrow-right" :size="14" />
+                </span>
+              </button>
             </div>
 
-            <p v-else class="empty">暂无文章，请先完成抓取。</p>
-            <p class="empty" v-if="articleTotal > 0">当前筛选共 {{ articleTotal }} 篇</p>
+            <p class="empty article-total" v-if="articleTotal > 0">当前筛选 {{ articleRangeText }}（第 {{ articleCurrentPage }} / {{ articlePageCount }} 页）</p>
           </article>
+          </div>
         </section>
       </template>
 
@@ -1514,6 +1954,7 @@ onBeforeUnmount(() => {
             <div class="db-meta">
               <span>表：{{ dbView.table || '-' }}</span>
               <span v-if="dbView.tableComment">说明：{{ dbView.tableComment }}</span>
+              <span>主键：{{ dbPrimaryKeyText }}</span>
               <span>记录：{{ dbRangeText }}</span>
             </div>
 
@@ -1558,6 +1999,29 @@ onBeforeUnmount(() => {
                   {{ column }}
                 </button>
               </div>
+
+              <div class="db-crud">
+                <button
+                  class="btn btn--primary"
+                  :disabled="busy.dbRows || busy.dbWrite || !dbView.table"
+                  @click="openDbCreateDialog"
+                >
+                  <span class="btn__inner">
+                    <AppIcon name="file-plus" :size="15" />
+                    <span>新增记录</span>
+                  </span>
+                </button>
+                <button
+                  class="btn btn--danger"
+                  :disabled="busy.dbRows || busy.dbWrite || !selectedDbCount || !dbView.primaryKeys.length"
+                  @click="deleteSelectedDbRows"
+                >
+                  <span class="btn__inner">
+                    <AppIcon name="x" :size="15" />
+                    <span>{{ selectedDbCount ? `删除选中 (${selectedDbCount})` : '删除选中' }}</span>
+                  </span>
+                </button>
+              </div>
             </div>
 
             <div class="db-table-wrap" v-if="busy.dbRows">
@@ -1568,15 +2032,46 @@ onBeforeUnmount(() => {
               <table>
                 <thead>
                   <tr>
+                    <th class="db-col-select">
+                      <input
+                        class="db-row-check"
+                        type="checkbox"
+                        :checked="isDbAllSelected"
+                        :disabled="busy.dbRows || busy.dbWrite || !dbSelectableRows.length"
+                        @change="toggleAllDbRows($event.target.checked)"
+                      />
+                    </th>
                     <th v-for="column in dbView.columns" :key="column" :title="dbView.columnComments[column] || ''">
                       {{ column }}
                     </th>
+                    <th class="db-col-actions">操作</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="(row, idx) in dbView.rows" :key="idx">
+                  <tr
+                    v-for="(row, idx) in dbView.rows"
+                    :key="idx"
+                    :class="{ 'db-row--active': isDbRowSelected(row) }"
+                  >
+                    <td class="db-col-select">
+                      <input
+                        class="db-row-check"
+                        type="checkbox"
+                        :checked="isDbRowSelected(row)"
+                        :disabled="!canEditDbRow(row)"
+                        @change="toggleDbRowSelection(row)"
+                        @click.stop
+                      />
+                    </td>
                     <td v-for="column in dbView.columns" :key="column">
                       <span :title="String(row[column] ?? '')">{{ row[column] ?? '-' }}</span>
+                    </td>
+                    <td class="db-col-actions">
+                      <button class="btn db-row-action-btn" :disabled="busy.dbWrite || !canEditDbRow(row)" @click.stop="openDbEditDialog(row)">
+                        <span class="btn__inner">
+                          <span>编辑</span>
+                        </span>
+                      </button>
                     </td>
                   </tr>
                 </tbody>
@@ -1733,6 +2228,46 @@ onBeforeUnmount(() => {
         </section>
       </template>
     </main>
+
+    <div class="preview-overlay" v-if="dbEditor.open" @click.self="closeDbEditor">
+      <section class="db-editor-panel">
+        <header>
+          <h3>{{ dbEditorTitle }}</h3>
+          <button class="btn" :disabled="busy.dbWrite" @click="closeDbEditor">
+            <span class="btn__inner">
+              <AppIcon name="x" :size="15" />
+              <span>关闭</span>
+            </span>
+          </button>
+        </header>
+
+        <p class="db-editor-tip">
+          <span v-if="dbEditor.mode === 'update'">主键：{{ JSON.stringify(dbEditor.pk) }}</span>
+          <span>请输入 JSON 对象，使用 <code>null</code> 表示空值。</span>
+        </p>
+
+        <textarea
+          v-model="dbEditor.payload"
+          class="db-editor-textarea"
+          spellcheck="false"
+          placeholder='例如：{"id": "demo", "name": "示例"}'
+        ></textarea>
+
+        <div class="actions">
+          <button class="btn" :disabled="busy.dbWrite" @click="closeDbEditor">
+            <span class="btn__inner">
+              <span>取消</span>
+            </span>
+          </button>
+          <button class="btn btn--primary" :disabled="busy.dbWrite" @click="submitDbEditor">
+            <span class="btn__inner">
+              <AppIcon name="check-circle" :size="15" />
+              <span>{{ busy.dbWrite ? '提交中...' : dbEditor.mode === 'create' ? '确认新增' : '确认更新' }}</span>
+            </span>
+          </button>
+        </div>
+      </section>
+    </div>
 
     <div class="boot-overlay" v-if="busy.boot">
       <div class="boot-card">
